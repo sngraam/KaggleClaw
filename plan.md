@@ -96,3 +96,45 @@ Special token	Purpose	Token ID
 look and create file 
 
 - looking code for frontend what bug look wrong corect this with correct logic 
+
+--------
+
+Now this:
+
+1. what current frontend show chat does is warped in conatiner (user or assistant ) and show so this cousing scolling error and text got text positition fixed and hideenflow hide - use normal chatgpt or chat interface so thos not create error 
+2. when model typing any code this process whill stop i gues tool calling trigger which good but  stop is bug correct that use  tool call method like 
+```
+                new_messages = encoding.parse_messages_from_completion_tokens(token_buffer, Role.ASSISTANT)
+                conversation.messages.extend(new_messages)
+                last_message = new_messages[-1]
+    
+                if last_message.channel == 'final':
+                ...
+    
+                if last_message.recipient == 'python':
+                    python_calls += 1
+                    tool_responses = local_tool.process_sync_plus(last_message)
+```
+
+like this help to  get correct tool calling
+
+---
+
+when we start agent this process also show what model enter prompt  and what's goinig on
+model  ganration same as chat
+
+---
+Error face 
+
+Task exception was never retrieved
+future: <Task finished name='Task-63' coro=<AgentRunner.run() done, defined at /kaggle/working/KaggleClaw/agent/run.py:77> exception=APIError('Unexpected token 12606 while expecting start token 200006')>
+Traceback (most recent call last):
+  File "/kaggle/working/KaggleClaw/agent/run.py", line 104, in run
+    async for msg in stream_completion(
+  File "/kaggle/working/KaggleClaw/agent/harmony.py", line 117, in stream_completion
+    async for chunk in stream:
+  File "/usr/local/lib/python3.12/dist-packages/openai/_streaming.py", line 153, in __aiter__
+    async for item in self._iterator:
+  File "/usr/local/lib/python3.12/dist-packages/openai/_streaming.py", line 200, in __stream__
+    raise APIError(
+openai.APIError: Unexpected token 12606 while expecting start token 200006

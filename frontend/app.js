@@ -1,100 +1,72 @@
 /**
- * KaggleClaw — Frontend SSE consumer and event renderer (v2)
- * ES6 vanilla JS, no frameworks
- *
- * Harmony token channels (from harmony docs):
- *   analysis → thinking (chain-of-thought)
- *   final    → model final text output
- *   commentary/call → tool calls
+ * KaggleClaw — Frontend chat consumer (v3)
+ * Flat ChatGPT-style interface. No overflow containers causing scroll issues.
+ * Each message is a flex row: avatar + content bubble.
  */
 
-// ── Globals ─────────────────────────────────────────────────────
+// ── State ────────────────────────────────────────────────────────
 let eventSource = null;
 let stats = { turns: 0, tools: 0, events: 0 };
 let isAgentRunning = false;
 
-// Active streaming cards — finalized when a new block starts
-let activeTextCard = null;   // "final" channel streaming card
-let activeThinkCard = null;  // "analysis" channel streaming card
+// Active streaming text node for the current assistant turn
+let activeAssistantMsg = null; // DOM element for the current streaming message
+let activeThinkBlock = null;   // DOM element for the current thinking block
 
 // ── Init ─────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  // Configure marked.js for proper rendering
-  marked.setOptions({
-    breaks: true,
-    gfm: true,
-    tables: true,
-  });
-
+  marked.setOptions({ breaks: true, gfm: true });
   loadCompetitionInfo();
   loadHealth();
   connectSSE();
-  hljs.highlightAll();
   loadFileTree();
 });
 
-// ── SSE Connection ───────────────────────────────────────────────
+// ── SSE ──────────────────────────────────────────────────────────
 function connectSSE() {
-  if (eventSource) { eventSource.close(); }
-
+  if (eventSource) eventSource.close();
   eventSource = new EventSource('/stream');
-
-  eventSource.onopen = () => {
-    console.log('[KaggleClaw] SSE connected');
-  };
-
   eventSource.onmessage = (e) => {
-    try {
-      const data = JSON.parse(e.data);
-      handleEvent(data);
-    } catch (err) {
-      console.warn('SSE parse error:', err);
-    }
+    try { handleEvent(JSON.parse(e.data)); } catch {}
   };
-
-  eventSource.onerror = () => {
-    console.warn('[KaggleClaw] SSE connection lost, retrying in 3s...');
-    setTimeout(connectSSE, 3000);
-  };
+  eventSource.onerror = () => setTimeout(connectSSE, 3000);
 }
 
-// ── Event Router ────────────────────────────────────────────────
+// ── Event Router ─────────────────────────────────────────────────
 function handleEvent(data) {
   if (data.type === 'ping') return;
-
   stats.events++;
   updateStats();
 
   switch (data.type) {
     case 'thinking':
-      renderThinking(data.content);
+      appendThinking(data.content);
       break;
     case 'text':
-      // Ensure thinking is finalized before text
-      if (activeThinkCard) finalizeThinkCard();
-      renderText(data.content);
+      finalizeThinking();
+      appendAssistantText(data.content);
       break;
     case 'tool_call':
-      finalizeTextCard();
-      finalizeThinkCard();
-      renderToolCall(data.tool_name, data.content);
+      finalizeAssistant();
+      finalizeThinking();
+      appendToolCall(data.tool_name, data.content);
       stats.tools++;
       updateStats();
       break;
     case 'tool_result':
-      renderToolResult(data.tool_name, data.content);
+      appendToolResult(data.tool_name, data.content);
       break;
     case 'error':
-      finalizeTextCard();
-      finalizeThinkCard();
-      renderError(data.content, data.tool_name);
+      finalizeAssistant();
+      finalizeThinking();
+      appendError(data.content);
       break;
     case 'status':
-      handleStatus(data.content, data.metadata);
+      handleStatusEvent(data.content, data.metadata);
       break;
     case 'done':
-      finalizeTextCard();
-      finalizeThinkCard();
+      finalizeAssistant();
+      finalizeThinking();
       setStatus('done', '✅ Done');
       isAgentRunning = false;
       setTypingVisible(false);
@@ -104,142 +76,233 @@ function handleEvent(data) {
   }
 }
 
-// ── Renderers ────────────────────────────────────────────────────
+// ── Chat Message Builders ────────────────────────────────────────
 
-function renderThinking(text) {
-  hideFeedEmpty();
-  if (!activeThinkCard) {
-    activeThinkCard = createCard('thinking', '🧠', 'Reasoning', '', true);
+/** Create a message row. Returns the content element. */
+function createMsgRow(type, icon, headerLabel) {
+  const row = document.createElement('div');
+  row.className = `msg-row msg-${type}`;
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.textContent = icon;
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+
+  if (headerLabel) {
+    const hdr = document.createElement('div');
+    hdr.className = 'msg-header';
+    hdr.textContent = headerLabel;
+    bubble.appendChild(hdr);
   }
-  const body = activeThinkCard.querySelector('.card-body');
-  body.textContent += text;
+
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  bubble.appendChild(body);
+
+  if (type === 'user') {
+    row.appendChild(bubble);
+    row.appendChild(avatar);
+  } else {
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+  }
+
+  document.getElementById('feed').appendChild(row);
+  autoScroll();
+  hideFeedEmpty();
+  return body;
+}
+
+// ── Thinking block (collapsible) ─────────────────────────────────
+function appendThinking(text) {
+  if (!activeThinkBlock) {
+    // Create the thinking collapsible row
+    const row = document.createElement('div');
+    row.className = 'msg-row msg-think';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'msg-avatar';
+    avatar.textContent = '🧠';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    const toggle = document.createElement('div');
+    toggle.className = 'think-toggle';
+    toggle.innerHTML = '<span class="think-label">Reasoning <span class="think-arrow">▾</span></span>';
+    const body = document.createElement('div');
+    body.className = 'think-body open';
+    body.style.whiteSpace = 'pre-wrap';
+
+    toggle.addEventListener('click', () => {
+      body.classList.toggle('open');
+      toggle.querySelector('.think-arrow').textContent = body.classList.contains('open') ? '▾' : '▸';
+    });
+
+    bubble.appendChild(toggle);
+    bubble.appendChild(body);
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    document.getElementById('feed').appendChild(row);
+    activeThinkBlock = body;
+    hideFeedEmpty();
+  }
+  activeThinkBlock.textContent += text;
   autoScroll();
 }
 
-function renderText(text) {
-  hideFeedEmpty();
-  if (!activeTextCard) {
-    activeTextCard = createCard('text', '💬', 'Agent', '', true);
-    const body = activeTextCard.querySelector('.card-body');
-    body.innerHTML = '<div class="md-content streaming-cursor"></div>';
+function finalizeThinking() {
+  activeThinkBlock = null;
+}
+
+// ── Assistant text (streaming markdown) ──────────────────────────
+function appendAssistantText(text) {
+  if (!activeAssistantMsg) {
+    const row = document.createElement('div');
+    row.className = 'msg-row msg-assistant';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'msg-avatar';
+    avatar.textContent = '⚡';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    const body = document.createElement('div');
+    body.className = 'msg-body md-content streaming-cursor';
+    body._raw = '';
+    bubble.appendChild(body);
+
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    document.getElementById('feed').appendChild(row);
+    activeAssistantMsg = body;
+    hideFeedEmpty();
   }
-  const mdDiv = activeTextCard.querySelector('.md-content');
-  mdDiv._raw = (mdDiv._raw || '') + text;
-  mdDiv.innerHTML = marked.parse(mdDiv._raw);
-  mdDiv.classList.add('streaming-cursor');
-  // Re-highlight code blocks
-  mdDiv.querySelectorAll('pre code').forEach(block => {
-    if (!block.dataset.highlighted) {
-      hljs.highlightElement(block);
-      block.dataset.highlighted = 'yes';
-    }
+
+  activeAssistantMsg._raw = (activeAssistantMsg._raw || '') + text;
+  activeAssistantMsg.innerHTML = marked.parse(activeAssistantMsg._raw);
+  activeAssistantMsg.classList.add('streaming-cursor');
+
+  // Re-highlight code blocks without duplicating
+  activeAssistantMsg.querySelectorAll('pre code:not([data-hl])').forEach(block => {
+    hljs.highlightElement(block);
+    block.dataset.hl = '1';
   });
   autoScroll();
 }
 
-function finalizeTextCard() {
-  if (activeTextCard) {
-    const mdDiv = activeTextCard.querySelector('.md-content');
-    if (mdDiv) {
-      mdDiv.classList.remove('streaming-cursor');
-      // Final highlight pass
-      mdDiv.querySelectorAll('pre code:not([data-highlighted])').forEach(b => hljs.highlightElement(b));
-    }
-    activeTextCard = null;
+function finalizeAssistant() {
+  if (activeAssistantMsg) {
+    activeAssistantMsg.classList.remove('streaming-cursor');
+    activeAssistantMsg.querySelectorAll('pre code:not([data-hl])').forEach(block => {
+      hljs.highlightElement(block);
+      block.dataset.hl = '1';
+    });
+    activeAssistantMsg = null;
   }
 }
 
-function finalizeThinkCard() {
-  activeThinkCard = null;
+// ── User message ──────────────────────────────────────────────────
+function appendUserMsg(text) {
+  finalizeAssistant();
+  finalizeThinking();
+  const body = createMsgRow('user', '🙋', null);
+  body.textContent = text;
 }
 
-function renderToolCall(toolName, args) {
-  hideFeedEmpty();
+// ── Tool Call ─────────────────────────────────────────────────────
+function appendToolCall(toolName, args) {
   stats.turns++;
   updateStats();
 
-  const card = createCard('tool-call', '🔧', 'Tool Call', toolName, true);
-  const body = card.querySelector('.card-body');
+  const row = document.createElement('div');
+  row.className = 'msg-row msg-tool';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.textContent = '🔧';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble tool-bubble';
+
+  const hdr = document.createElement('div');
+  hdr.className = 'msg-header tool-header';
+  hdr.innerHTML = `Tool Call <span class="tool-name">${toolName}</span>`;
 
   const pre = document.createElement('pre');
   const code = document.createElement('code');
   code.classList.add('language-json');
-  // Try to pretty-print JSON args
   try {
-    const parsed = JSON.parse(args);
-    code.textContent = JSON.stringify(parsed, null, 2);
-  } catch {
-    code.textContent = args || '(no arguments)';
+    code.textContent = JSON.stringify(JSON.parse(args), null, 2);
+  } catch { 
+    code.textContent = args || '{}'; 
   }
   pre.appendChild(code);
-  body.appendChild(pre);
   hljs.highlightElement(code);
 
+  bubble.appendChild(hdr);
+  bubble.appendChild(pre);
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  document.getElementById('feed').appendChild(row);
+  hideFeedEmpty();
   autoScroll();
 }
 
-function renderToolResult(toolName, output) {
-  hideFeedEmpty();
-  const card = createCard('tool-result', '📤', 'Tool Output', toolName, false);
-  const body = card.querySelector('.card-body');
+// ── Tool Result ───────────────────────────────────────────────────
+function appendToolResult(toolName, output) {
+  const row = document.createElement('div');
+  row.className = 'msg-row msg-tool-result';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.textContent = '📤';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+
+  const toggle = document.createElement('div');
+  toggle.className = 'think-toggle';
+  toggle.innerHTML = `<span class="think-label">Output <span class="tool-name">${toolName}</span> <span class="think-arrow">▸</span></span>`;
+
+  const body = document.createElement('pre');
+  body.className = 'tool-output';
+  body.style.display = 'none';
   body.textContent = output || '(empty)';
-  autoScroll();
-}
 
-function renderError(msg, toolName) {
-  hideFeedEmpty();
-  const card = createCard('error', '⚠️', 'Error', toolName || '', true);
-  const body = card.querySelector('.card-body');
-  body.textContent = msg;
-  autoScroll();
-}
-
-function renderUserMsg(text) {
-  finalizeTextCard();
-  finalizeThinkCard();
-  hideFeedEmpty();
-  const card = createCard('user', '🙋', 'You', '', true);
-  const body = card.querySelector('.card-body');
-  body.textContent = text;
-  autoScroll();
-}
-
-// ── Card Factory ────────────────────────────────────────────────
-function createCard(type, icon, label, toolName, openByDefault) {
-  const card = document.createElement('div');
-  card.className = `event-card ${type}`;
-
-  const header = document.createElement('div');
-  header.className = 'card-header';
-  header.innerHTML = `
-    <span class="card-icon">${icon}</span>
-    <span class="card-label">${label}</span>
-    ${toolName ? `<span class="card-tool-name">${toolName}</span>` : ''}
-    <span class="card-toggle ${openByDefault ? 'open' : ''}">▼</span>
-  `;
-
-  const body = document.createElement('div');
-  body.className = `card-body ${openByDefault ? 'open' : ''}`;
-
-  header.addEventListener('click', () => {
-    const open = body.classList.toggle('open');
-    header.querySelector('.card-toggle').classList.toggle('open', open);
+  toggle.addEventListener('click', () => {
+    const open = body.style.display === 'none';
+    body.style.display = open ? '' : 'none';
+    toggle.querySelector('.think-arrow').textContent = open ? '▾' : '▸';
   });
 
-  card.appendChild(header);
-  card.appendChild(body);
-  document.getElementById('feed').appendChild(card);
-  return card;
+  bubble.appendChild(toggle);
+  bubble.appendChild(body);
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  document.getElementById('feed').appendChild(row);
+  autoScroll();
 }
 
-// ── Status Handling ──────────────────────────────────────────────
-function handleStatus(content, metadata) {
-  if (content?.includes('Starting agent')) {
+// ── Error ─────────────────────────────────────────────────────────
+function appendError(msg) {
+  const body = createMsgRow('error', '⚠️', 'Error');
+  body.textContent = msg;
+}
+
+// ── Status Event ──────────────────────────────────────────────────
+function handleStatusEvent(content, metadata) {
+  if (!content || content === 'Calling model...') return;
+
+  if (content.includes('Starting agent') || content.includes('Turn ')) {
     setStatus('running', 'Running');
     isAgentRunning = true;
     setTypingVisible(true);
     setStopGenVisible(true);
-  } else if (content?.includes('cancelled')) {
+  } else if (content.includes('cancelled')) {
     setStatus('idle', 'Idle');
     isAgentRunning = false;
     setTypingVisible(false);
@@ -255,18 +318,16 @@ function handleStatus(content, metadata) {
     setBtnLoading(false);
   }
 
-  // Only show non-trivial status messages
-  if (content && content !== 'Calling model...') {
-    const feed = document.getElementById('feed');
-    const el = document.createElement('div');
-    el.className = 'event-status';
-    el.textContent = content;
-    feed.appendChild(el);
-    autoScroll();
-  }
+  // Small inline status message
+  const feed = document.getElementById('feed');
+  const el = document.createElement('div');
+  el.className = 'status-chip';
+  el.textContent = content;
+  feed.appendChild(el);
+  autoScroll();
 }
 
-// ── API Calls ────────────────────────────────────────────────────
+// ── API Calls ─────────────────────────────────────────────────────
 async function startAgent() {
   if (isAgentRunning) return;
   isAgentRunning = true;
@@ -283,14 +344,14 @@ async function startAgent() {
     });
     const data = await res.json();
     if (data.error) {
-      renderError(data.error);
+      appendError(data.error);
       setStatus('error', 'Error');
       isAgentRunning = false;
       setStopGenVisible(false);
       setBtnLoading(false);
     }
   } catch (e) {
-    renderError(`Failed to start agent: ${e.message}`);
+    appendError(`Failed to start agent: ${e.message}`);
     setStatus('error', 'Error');
     isAgentRunning = false;
     setStopGenVisible(false);
@@ -302,12 +363,9 @@ async function sendMessage() {
   const input = document.getElementById('chat-input');
   const text = input.value.trim();
   if (!text) return;
-
   input.value = '';
-  finalizeTextCard();
-  finalizeThinkCard();
-  renderUserMsg(text);
 
+  appendUserMsg(text);
   setTypingVisible(true);
   setStopGenVisible(true);
   setStatus('running', 'Responding...');
@@ -319,7 +377,7 @@ async function sendMessage() {
       body: JSON.stringify({ message: text }),
     });
   } catch (e) {
-    renderError(`Chat failed: ${e.message}`);
+    appendError(`Chat failed: ${e.message}`);
     setStopGenVisible(false);
   }
 }
@@ -327,8 +385,8 @@ async function sendMessage() {
 async function stopGeneration() {
   try {
     await fetch('/reset', { method: 'POST' });
-    finalizeTextCard();
-    finalizeThinkCard();
+    finalizeAssistant();
+    finalizeThinking();
     setTypingVisible(false);
     setStopGenVisible(false);
     setStatus('idle', 'Stopped');
@@ -340,53 +398,43 @@ async function stopGeneration() {
 }
 
 async function resetAgent() {
-  if (!confirm('Full reset? This clears all conversation, stops all processes, and reloads the agent internally.')) return;
+  if (!confirm('Full reset? Clears conversation, stops all processes.')) return;
 
-  // Reset UI immediately
   const feed = document.getElementById('feed');
-  feed.innerHTML = '';
-  const emptyEl = document.createElement('div');
-  emptyEl.className = 'feed-empty';
-  emptyEl.id = 'feed-empty';
-  emptyEl.innerHTML = `
-    <div class="empty-icon">⚡</div>
-    <div class="empty-title">KaggleClaw Ready</div>
-    <div class="empty-body">Agent has been reset. Fill in <code>competition.md</code> and click <strong>Start Agent</strong>.</div>
+  feed.innerHTML = `
+    <div class="feed-empty" id="feed-empty">
+      <div class="empty-icon">⚡</div>
+      <div class="empty-title">KaggleClaw Ready</div>
+      <div class="empty-body">Agent reset. Fill in <code>competition.md</code> and click <strong>Start Agent</strong>.</div>
+    </div>
   `;
-  feed.appendChild(emptyEl);
 
   stats = { turns: 0, tools: 0, events: 0 };
   updateStats();
   isAgentRunning = false;
-  finalizeTextCard();
-  finalizeThinkCard();
+  activeAssistantMsg = null;
+  activeThinkBlock = null;
   setStatus('idle', 'Idle');
   setTypingVisible(false);
   setStopGenVisible(false);
   setBtnLoading(false);
 
-  try {
-    await fetch('/reset', { method: 'POST' });
-  } catch (e) {
-    console.warn('Reset failed:', e);
-  }
-
-  // Reconnect SSE to fresh queue
+  try { await fetch('/reset', { method: 'POST' }); } catch {}
   connectSSE();
 }
 
-// ── File Tree ────────────────────────────────────────────────────
+// ── File Tree ─────────────────────────────────────────────────────
 async function loadFileTree() {
   const treeEl = document.getElementById('file-tree');
   const loadingEl = document.getElementById('file-tree-loading');
   try {
     const res = await fetch('/files');
-    if (!res.ok) throw new Error('No /files endpoint');
+    if (!res.ok) throw new Error();
     const data = await res.json();
     if (loadingEl) loadingEl.style.display = 'none';
     renderFileTree(treeEl, data.tree || []);
-  } catch (e) {
-    if (loadingEl) loadingEl.textContent = 'File tree unavailable';
+  } catch {
+    if (loadingEl) loadingEl.textContent = 'Unavailable';
   }
 }
 
@@ -398,48 +446,37 @@ function refreshFileTree() {
   loadFileTree();
 }
 
-function renderFileTree(container, nodes, depth = 0) {
+function renderFileTree(container, nodes) {
   for (const node of nodes) {
     if (node.type === 'dir') {
-      const wrapper = document.createElement('div');
+      const wrap = document.createElement('div');
       const dirEl = document.createElement('div');
       dirEl.className = 'ft-dir';
-      dirEl.innerHTML = `<span class="ft-dir-arrow">▶</span>📁 ${node.name}`;
+      dirEl.innerHTML = `<span class="ft-arrow">▸</span>📁 ${node.name}`;
 
       const children = document.createElement('div');
       children.className = 'ft-children hidden';
-      if (node.children && node.children.length > 0) {
-        renderFileTree(children, node.children, depth + 1);
-      }
+      if (node.children?.length) renderFileTree(children, node.children);
 
       dirEl.addEventListener('click', () => {
         children.classList.toggle('hidden');
-        dirEl.querySelector('.ft-dir-arrow').classList.toggle('open');
+        dirEl.querySelector('.ft-arrow').textContent = children.classList.contains('hidden') ? '▸' : '▾';
       });
-
-      wrapper.appendChild(dirEl);
-      wrapper.appendChild(children);
-      container.appendChild(wrapper);
+      wrap.appendChild(dirEl);
+      wrap.appendChild(children);
+      container.appendChild(wrap);
     } else {
       const fileEl = document.createElement('div');
       fileEl.className = 'ft-file';
       const ext = node.name.split('.').pop();
-      const icon = getFileIcon(ext);
-      fileEl.innerHTML = `${icon} ${node.name}`;
+      const icons = { py:'🐍',js:'📜',json:'📋',md:'📝',csv:'📊',txt:'📄',html:'🌐',css:'🎨',ipynb:'📓',sh:'⚙️' };
+      fileEl.innerHTML = `${icons[ext] || '📄'} ${node.name}`;
       container.appendChild(fileEl);
     }
   }
 }
 
-function getFileIcon(ext) {
-  const icons = {
-    py: '🐍', js: '📜', json: '📋', md: '📝', csv: '📊',
-    txt: '📄', html: '🌐', css: '🎨', ipynb: '📓', sh: '⚙️'
-  };
-  return icons[ext] || '📄';
-}
-
-// ── Sidebar Load ─────────────────────────────────────────────────
+// ── Sidebar Data ──────────────────────────────────────────────────
 async function loadCompetitionInfo() {
   try {
     const res = await fetch('/competition');
@@ -451,19 +488,9 @@ async function loadCompetitionInfo() {
     setText('s-deadline', data.deadline || '—');
     setText('comp-task', data.task || '—');
     setText('comp-metric', data.metric || '—');
-
-    if (data.url && data.url !== '—') {
-      const link = document.getElementById('s-url');
-      link.href = data.url;
-    }
-
-    const badge = document.getElementById('comp-badge');
-    if (data.task !== '—' || data.metric !== '—') {
-      badge.classList.remove('hidden');
-    }
-  } catch (e) {
-    console.warn('Could not load competition info:', e);
-  }
+    if (data.url && data.url !== '—') document.getElementById('s-url').href = data.url;
+    if (data.task !== '—' || data.metric !== '—') document.getElementById('comp-badge').classList.remove('hidden');
+  } catch {}
 }
 
 async function loadHealth() {
@@ -472,17 +499,14 @@ async function loadHealth() {
     const data = await res.json();
     if (data.public_url) {
       const pill = document.getElementById('url-pill');
-      const urlText = document.getElementById('url-text');
+      document.getElementById('url-text').textContent = data.public_url.replace('https://', '');
       pill.href = data.public_url;
-      urlText.textContent = data.public_url.replace('https://', '');
       pill.classList.remove('hidden');
     }
-  } catch (e) {
-    // fine
-  }
+  } catch {}
 }
 
-// ── UI Helpers ───────────────────────────────────────────────────
+// ── UI Helpers ────────────────────────────────────────────────────
 function hideFeedEmpty() {
   const el = document.getElementById('feed-empty');
   if (el) el.style.display = 'none';
@@ -494,14 +518,12 @@ function setStatus(type, text) {
   document.getElementById('status-text').textContent = text;
 }
 
-function setTypingVisible(visible) {
-  const el = document.getElementById('typing-indicator');
-  el.classList.toggle('hidden', !visible);
+function setTypingVisible(v) {
+  document.getElementById('typing-indicator').classList.toggle('hidden', !v);
 }
 
-function setStopGenVisible(visible) {
-  const el = document.getElementById('btn-stop-gen');
-  el.classList.toggle('hidden', !visible);
+function setStopGenVisible(v) {
+  document.getElementById('btn-stop-gen').classList.toggle('hidden', !v);
 }
 
 function setBtnLoading(loading) {
@@ -523,21 +545,16 @@ function updateStats() {
 
 function autoScroll() {
   const feed = document.getElementById('feed');
-  // Only auto-scroll if user is near the bottom
-  const threshold = 120;
-  const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < threshold;
-  if (nearBottom) {
-    feed.scrollTop = feed.scrollHeight;
-  }
+  const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 150;
+  if (nearBottom) feed.scrollTop = feed.scrollHeight;
 }
 
-// ── Model Hosting ────────────────────────────────────────────────
+// ── Model Hosting ─────────────────────────────────────────────────
 async function triggerHostModel() {
   const btn = document.getElementById('btn-host-model');
   const btnStop = document.getElementById('btn-stop-hosting');
   btn.disabled = true;
   btn.textContent = '⏳ Hosting...';
-
   try {
     const res = await fetch('/host_model', { method: 'POST' });
     const data = await res.json();
@@ -545,15 +562,9 @@ async function triggerHostModel() {
       btn.classList.add('hidden');
       if (btnStop) btnStop.classList.remove('hidden');
     } else {
-      btn.textContent = '❌ Failed';
-      btn.disabled = false;
-      console.error(data.error || 'Unknown error');
+      btn.textContent = '❌ Failed'; btn.disabled = false;
     }
-  } catch (e) {
-    btn.textContent = '❌ Failed';
-    btn.disabled = false;
-    console.error(e);
-  }
+  } catch { btn.textContent = '❌ Failed'; btn.disabled = false; }
 }
 
 async function triggerStopHosting() {
@@ -561,21 +572,11 @@ async function triggerStopHosting() {
   const btnStop = document.getElementById('btn-stop-hosting');
   btnStop.disabled = true;
   btnStop.textContent = '⏳ Stopping...';
-
   try {
     await fetch('/stop_hosting', { method: 'POST' });
     btnStop.classList.add('hidden');
     btnStop.disabled = false;
     btnStop.textContent = 'Stop Hosting';
-
-    if (btnStart) {
-      btnStart.classList.remove('hidden');
-      btnStart.disabled = false;
-      btnStart.textContent = 'Host Model';
-    }
-  } catch (e) {
-    btnStop.textContent = '❌ Failed';
-    btnStop.disabled = false;
-    console.error(e);
-  }
+    if (btnStart) { btnStart.classList.remove('hidden'); btnStart.disabled = false; btnStart.textContent = 'Host Model'; }
+  } catch { btnStop.textContent = '❌ Failed'; btnStop.disabled = false; }
 }

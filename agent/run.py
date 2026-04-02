@@ -165,32 +165,37 @@ class AgentRunner:
             return ""
         parts = []
         for item in msg.content:
-            if hasattr(item, "text"):
+            if hasattr(item, "text") and item.text:
                 parts.append(item.text)
         return "\n".join(parts)
 
     async def _route_tool_calls(self, messages: list[Message]) -> bool:
         """
-        Look at the last assistant message, find any tool-directed sub-messages,
-        route them to the right tool, collect responses, append to history.
+        Route tool calls based on harmony message channel and recipient.
+
+        In the harmony format:
+          - channel='analysis' → chain-of-thought, skip (already emitted as thinking)
+          - channel='final'    → user-facing answer, keep in history
+          - recipient=<tool>   → tool call, process with the tool
+
         Returns True if at least one tool was called.
         """
         last_msg = messages[-1]
-        if not last_msg.content:
-            return False
-
-        # In openai_harmony, tool calls are sub-messages routed to tool names via .recipient
-        # For simplicity, we scan the text for tool invocation markers
-        # The model produces messages with recipients set to tool names
-        # Here we handle the case where the model produces a message for each tool call
-
         tool_called = False
 
-        # Check if last message has a recipient that maps to a tool
-        recipient = getattr(last_msg, "recipient", None) or getattr(last_msg, "_recipient", None)
+        # Get channel and recipient from harmony message
+        channel = getattr(last_msg, "channel", None)
+        recipient = getattr(last_msg, "recipient", None)
+        if not recipient:
+            recipient = getattr(last_msg, "_recipient", None)
 
-        if recipient and recipient in self._tool_map:
-            tool = self._tool_map[recipient]
+        # Skip analysis (thinking) messages — they are not tool calls
+        if channel == "analysis":
+            return False
+
+        # If recipient is the name of a registered tool, call it
+        if recipient and str(recipient) in self._tool_map:
+            tool = self._tool_map[str(recipient)]
             tool_name = tool.name
             args_text = self._extract_text(last_msg)
 
@@ -211,9 +216,8 @@ class AgentRunner:
             except Exception as e:
                 err = f"[TOOL ERROR] {tool_name}: {e}"
                 await self._emit(AgentEvent(type="error", content=err, tool_name=tool_name))
-                # Inject error as tool response so model can retry
-                err_msg = tool.error_message(err)
-                self._messages.append(err_msg)
+                if hasattr(tool, "error_message"):
+                    self._messages.append(tool.error_message(err))
                 tool_called = True
 
         return tool_called
