@@ -1,64 +1,25 @@
 """
-agent/harmony.py — Harmony token-based streaming wrapper for gpt-oss / OSS-120B.
+agent/harmony.py — Simple, correct Harmony streaming wrapper for OSS-120B.
 
 Architecture:
-  1. Encode conversation messages into harmony tokens via openai_harmony
-  2. Call vLLM /v1/completions with prompt_token_ids (NOT chat/completions)
-  3. Stream token IDs back, buffer them, and parse harmony messages
-  4. Route by channel: analysis→thinking, final→text, tool call→tool_call event
+  1. Build standard chat messages (system/user/assistant dicts)
+  2. Call vLLM /v1/chat/completions — the model outputs harmony tokens in text
+  3. Accumulate the full streamed text
+  4. Parse harmony special tokens to route by channel:
+       <|channel|>analysis  → thinking event
+       <|channel|>final     → text event (user-facing answer)
+       <|call|>tool_name    → tool_call event (stop token, model wants to call a tool)
 
-This is the correct approach for gpt-oss models. Using /v1/chat/completions
-causes "Unexpected token" errors because the model expects harmony-formatted input.
+This avoids broken token-ID plumbing and uses the standard OpenAI-compatible
+chat endpoint that vLLM serves out of the box.
 """
 
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal
-
-# ── Imports with graceful fallback ─────────────────────────────────────────────
-
-try:
-    from openai_harmony import (
-        load_harmony_encoding,
-        HarmonyEncodingName,
-        Conversation,
-        Message,
-        Role,
-        Author,
-        TextContent,
-        DeveloperContent,
-        SystemContent,
-        ReasoningEffort,
-        ToolNamespaceConfig,
-    )
-    _HARMONY_AVAILABLE = True
-except ImportError:
-    _HARMONY_AVAILABLE = False
-    # Minimal stubs so file can import without openai_harmony installed
-    class Role:
-        USER = "user"
-        ASSISTANT = "assistant"
-        SYSTEM = "system"
-        DEVELOPER = "developer"
-
-    class Author:
-        def __init__(self, role): self.role = role
-
-    class TextContent:
-        def __init__(self, text): self.text = text
-
-    class Message:
-        def __init__(self, author, content, channel=None, recipient=None):
-            self.author = author
-            self.content = content
-            self.channel = channel
-            self.recipient = recipient
-        def with_recipient(self, r): self.recipient = r; return self
-
-    class Conversation:
-        def __init__(self, messages=None): self.messages = messages or []
 
 
 # ── Event types ────────────────────────────────────────────────────────────────
@@ -84,23 +45,17 @@ class AgentEvent:
 
 
 # ── Message builders ────────────────────────────────────────────────────────────
+# Messages are plain dicts compatible with OpenAI chat API.
 
-def user_message(text: str) -> Message:
-    return Message.from_role_and_content(Role.USER, TextContent(text))
+def system_message(text: str) -> dict:
+    return {"role": "system", "content": text}
 
-def system_message(text: str) -> Message:
-    system = (
-        SystemContent.new()
-        .with_model_identity(text)
-        .with_reasoning_effort(ReasoningEffort.HIGH)
-        .with_tools(ToolNamespaceConfig.python())
-        .with_tools(ToolNamespaceConfig.browser())
-    )
+def user_message(text: str) -> dict:
+    return {"role": "user", "content": text}
 
-    return Message.from_role_and_content(Role.SYSTEM, system)
+def assistant_message(text: str) -> dict:
+    return {"role": "assistant", "content": text}
 
-def assistant_message(text: str, channel: str = "final") -> Message:
-    return Message.from_role_and_content(Role.ASSISTANT, TextContent(text))
 
 # ── OpenAI async client ────────────────────────────────────────────────────────
 
@@ -112,61 +67,90 @@ def _get_openai_client():
     return AsyncOpenAI(base_url=base_url, api_key=api_key)
 
 
-# ── Harmony encoding ───────────────────────────────────────────────────────────
+# ── Harmony token parsing ──────────────────────────────────────────────────────
+#
+# Model output format (from harmony docs):
+#
+#   <|start|>assistant<|channel|>analysis<|message|>...thinking...<|end|>
+#   <|start|>assistant<|channel|>final<|message|>...answer...<|return|>
+#   <|start|>assistant<|channel|>final<|message|>...partial...<|call|>python
+#
+# Special tokens:
+#   <|start|>    200006  — beginning of a message
+#   <|end|>      200007  — end of a message
+#   <|message|>  200008  — header → content transition
+#   <|channel|>  200005  — transition to channel info
+#   <|return|>   200002  — stop token: model done
+#   <|call|>     200012  — stop token: model wants to call a tool
+#   <|constrain|> 200003 — tool call data type definition
 
-_enc_cache = None
-
-def _get_encoding():
-    """Load the harmony encoding (cached)."""
-    global _enc_cache
-    if _enc_cache is None:
-        _enc_cache = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
-    return _enc_cache
-
-
-def _encode_messages(messages: list[Message]) -> list[int]:
-    """Render harmony messages to token IDs for the completions endpoint."""
-    enc = _get_encoding()
-    conv = Conversation(messages=list(messages))
-    # render_conversation_for_completion appends the assistant header to trigger generation
-    token_ids = enc.render_conversation_for_completion(conv, Role.ASSISTANT)
-    return token_ids
-
-
-def _parse_output_tokens(token_ids: list[int]) -> list[Message]:
-    """Parse harmony output token IDs back to Message objects."""
-    enc = _get_encoding()
-    return enc.parse_messages_from_completion_tokens(token_ids, Role.ASSISTANT)
+HARMONY_SPECIAL = re.compile(r"<\|[a-z_]+\|>")
 
 
-def _extract_text(msg: Message) -> str:
-    """Extract all text content from a message."""
-    parts = []
-    if hasattr(msg, "content") and msg.content:
-        for c in msg.content:
-            if hasattr(c, "text") and c.text:
-                parts.append(c.text)
-    return "".join(parts)
+def parse_harmony_output(raw: str) -> list[dict]:
+    """
+    Parse a full harmony model output into a list of structured segments.
+
+    Returns a list of dicts:
+        {"channel": "analysis"|"final", "content": str, "tool": str|None}
+
+    where `tool` is set when the segment ends with <|call|>tool_name.
+    """
+    segments = []
+
+    # Split on <|start|> to get individual message blocks
+    blocks = re.split(r"<\|start\|>", raw)
+
+    for block in blocks:
+        if not block.strip():
+            continue
+
+        # Extract channel
+        channel_match = re.search(r"<\|channel\|>(\w+)", block)
+        channel = channel_match.group(1) if channel_match else "final"
+
+        # Extract content after <|message|>
+        msg_match = re.search(r"<\|message\|>(.*?)(?=<\|(?:end|return|call)\|>|$)", block, re.DOTALL)
+        content = msg_match.group(1).strip() if msg_match else ""
+
+        # Extract tool name if present (stop by <|call|>tool_name)
+        tool_match = re.search(r"<\|call\|>(\w+)", block)
+        tool = tool_match.group(1) if tool_match else None
+
+        if content or tool:
+            segments.append({
+                "channel": channel,
+                "content": content,
+                "tool": tool,
+            })
+
+    return segments
+
+
+def _clean_for_display(text: str) -> str:
+    """Strip harmony special tokens from text for clean display."""
+    return HARMONY_SPECIAL.sub("", text).strip()
 
 
 # ── Streaming completion ───────────────────────────────────────────────────────
 
 async def stream_completion(
-    messages: list[Message],
+    messages: list[dict],
     model: str,
     tool_config: list | None = None,
     event_queue: asyncio.Queue | None = None,
-) -> AsyncIterator[Message]:
+) -> AsyncIterator[dict]:
     """
-    Stream a completion from the gpt-oss model using harmony token format.
+    Stream a completion from the OSS-120B model via vLLM chat/completions.
 
     Flow:
-      1. Encode messages → token IDs via openai_harmony
-      2. Call vLLM /v1/completions with prompt_token_ids
-      3. Accumulate streamed tokens
-      4. Parse harmony messages from output tokens
-      5. Emit AgentEvents per channel: analysis→thinking, final→text, recipient→tool_call
-      6. Yield completed assistant messages for history
+      1. Call /v1/chat/completions, stream text chunks
+      2. Emit live status/text events as chunks arrive (for responsiveness)
+      3. After stream ends, parse harmony tokens from full text
+      4. Re-emit properly typed events: thinking, text, tool_call
+      5. Yield the final assistant message dict for conversation history
+
+    Yields: assistant message dicts for appending to conversation history.
     """
 
     async def _emit(event: AgentEvent):
@@ -175,103 +159,108 @@ async def stream_completion(
 
     await _emit(AgentEvent(type="status", content="Calling model..."))
 
-    # ── Check harmony availability ──
-    if not _HARMONY_AVAILABLE:
-        await _emit(AgentEvent(type="error", content="openai_harmony not installed. Install with: pip install openai-harmony"))
-        return
-
     try:
         client = _get_openai_client()
 
-        # 1. Encode messages to token IDs
-        prompt_token_ids = _encode_messages(messages)
-
-        # 2. Call vLLM /v1/completions with token IDs
-        stream = await client.completions.create(
+        # Call the standard chat completions endpoint
+        stream = await client.chat.completions.create(
             model=model,
-            prompt=prompt_token_ids,   # vLLM accepts list of token IDs as prompt
+            messages=messages,
             stream=True,
-            max_tokens=65556,
-            stop=None,                 # harmony uses its own stop tokens within the model
+            max_tokens=16384,
             temperature=1.0,
+            stop=None,
         )
 
-        # 3. Accumulate tokens from stream
-        token_buffer: list[int] = []
-        full_text_for_events = ""
-        thinking_buffer = ""
-        final_buffer = ""
+        # Accumulate the full response text
+        full_text = ""
+        live_buffer = ""   # for live partial display before parse
 
         async for chunk in stream:
             choice = chunk.choices[0]
+            delta = choice.delta
 
-            # vLLM returns logprobs with token IDs when using completions endpoint
-            if hasattr(choice, "logprobs") and choice.logprobs and hasattr(choice.logprobs, "token_ids"):
-                new_ids = choice.logprobs.token_ids
-                token_buffer.extend(new_ids)
+            if delta and delta.content:
+                chunk_text = delta.content
+                full_text += chunk_text
+                live_buffer += chunk_text
 
-            # Also track text for streaming live feedback
-            if choice.text:
-                # Stream the raw text as-is for immediate feedback while tokens accumulate
-                # We'll parse properly at the end, but this gives live streaming feel
-                raw_chunk = choice.text
-                # Strip harmony special tokens from display text
-                display = _strip_harmony_tokens(raw_chunk)
-                if display:
-                    full_text_for_events += display
-                    await _emit(AgentEvent(type="text", content=display))
+                # Emit live text for responsiveness — but don't emit raw harmony tokens
+                # Wait until we have a natural break (space/newline) to avoid partial tokens
+                if "\n" in live_buffer or len(live_buffer) > 120:
+                    display = _clean_for_display(live_buffer)
+                    if display:
+                        await _emit(AgentEvent(type="text", content=display))
+                    live_buffer = ""
 
             if choice.finish_reason:
                 break
 
-        # 4. If we have token IDs, parse harmony messages for proper channel routing
-        if token_buffer:
-            try:
-                parsed_msgs = _parse_output_tokens(token_buffer)
-                # Re-emit as proper typed events
-                # First clear previous text events by emitting a "done" marker
-                for pmsg in parsed_msgs:
-                    channel = getattr(pmsg, "channel", "final")
-                    recipient = getattr(pmsg, "recipient", "assistant")
-                    text = _extract_text(pmsg)
+        # Flush any remaining live buffer
+        if live_buffer:
+            display = _clean_for_display(live_buffer)
+            if display:
+                await _emit(AgentEvent(type="text", content=display))
 
-                    if channel == "analysis":
-                        # Chain-of-thought thinking
-                        if text:
-                            await _emit(AgentEvent(type="thinking", content=text))
+        # Now parse the full text for proper channel routing
+        if full_text:
+            segments = parse_harmony_output(full_text)
+
+            if segments:
+                # Clear the live text events and re-emit as structured events
+                # (The frontend should handle overwrite when it sees structured segments)
+                await _emit(AgentEvent(type="status", content="Parsing response..."))
+
+                final_text_parts = []
+
+                for seg in segments:
+                    channel = seg["channel"]
+                    content = seg["content"]
+                    tool = seg["tool"]
+
+                    if channel == "analysis" and content:
+                        # Chain-of-thought reasoning → thinking block
+                        await _emit(AgentEvent(type="thinking", content=content))
+
                     elif channel == "final":
-                        # This is the actual response — yield for history
-                        if text:
-                            yield pmsg
-                    elif recipient and recipient not in ("assistant", None):
-                        # Tool call — recipient is the tool name
-                        await _emit(AgentEvent(
-                            type="tool_call",
-                            tool_name=str(recipient),
-                            content=text,
-                        ))
-            except Exception as parse_err:
-                # Fallback: we already streamed text events above, just yield assistant msg
-                if full_text_for_events:
-                    yield assistant_message(full_text_for_events)
-        elif full_text_for_events:
-            # Fallback: no token IDs in stream, use accumulated text
-            yield assistant_message(full_text_for_events)
+                        if tool:
+                            # Tool call — content before <|call|> is the tool input
+                            await _emit(AgentEvent(
+                                type="tool_call",
+                                tool_name=tool,
+                                content=content,
+                            ))
+                        elif content:
+                            final_text_parts.append(content)
+                            await _emit(AgentEvent(type="text", content=content))
+
+                # Yield the final assistant message for conversation history
+                final_content = "\n".join(final_text_parts) if final_text_parts else _clean_for_display(full_text)
+                if final_content:
+                    yield assistant_message(final_content)
+
+                # Check for any tool calls and yield tool call info
+                for seg in segments:
+                    if seg.get("tool"):
+                        yield {
+                            "role": "assistant",
+                            "content": seg["content"],
+                            "__tool__": seg["tool"],
+                        }
+
+            else:
+                # No harmony tokens found — model output is plain text (fallback)
+                plain = _clean_for_display(full_text)
+                if plain:
+                    await _emit(AgentEvent(type="text", content=plain))
+                    yield assistant_message(plain)
+        else:
+            await _emit(AgentEvent(type="error", content="Model returned empty response."))
 
     except Exception as e:
         err_msg = f"Model error: {e}"
         await _emit(AgentEvent(type="error", content=err_msg))
         raise
-
-
-def _strip_harmony_tokens(text: str) -> str:
-    """Remove harmony special tokens from display text."""
-    import re
-    # Remove harmony special tokens like <|start|>, <|end|>, <|channel|>analysis, etc.
-    cleaned = re.sub(r'<\|[a-z_]+\|>', '', text)
-    # Remove channel names that appear after <|channel|>
-    cleaned = re.sub(r'\b(analysis|final|commentary)\b\s*', '', cleaned)
-    return cleaned.strip()
 
 
 # ── Tool result emitter ───────────────────────────────────────────────────────
