@@ -46,7 +46,7 @@ def get_all_tools(
     tools.append(FileTool())
 
     # 4. Apply patch tool
-    from ..apply_patch import ApplyPatchTool
+    from ..apply_patch_tool import ApplyPatchTool
     tools.append(ApplyPatchTool())
 
     return tools

@@ -8,5 +8,6 @@ ngrok.set_auth_token(CONF_TOKEN)
 
 
 MODEL_PATH = "/kaggle/input/oss-120b"
-# GPU 1 h100
 
+PORT = 8000
+MODEL_NAME = "oss-120b"
