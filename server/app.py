@@ -101,6 +101,40 @@ async def competition_info():
     return build_competition_summary()
 
 
+@app.get("/files")
+async def list_files():
+    """Return a JSON directory tree of the Kaggle working directory for the file sidebar."""
+    import os as _os
+
+    def _build_tree(path: Path, max_depth: int = 3, depth: int = 0):
+        if depth > max_depth:
+            return []
+        nodes = []
+        try:
+            entries = sorted(path.iterdir(), key=lambda e: (not e.is_dir(), e.name.lower()))
+        except PermissionError:
+            return []
+        for entry in entries:
+            if entry.name.startswith('.') or entry.name == '__pycache__':
+                continue
+            if entry.is_dir():
+                nodes.append({
+                    "type": "dir",
+                    "name": entry.name,
+                    "children": _build_tree(entry, max_depth, depth + 1)
+                })
+            else:
+                nodes.append({"type": "file", "name": entry.name})
+        return nodes
+
+    working_dir = Path(_os.environ.get("KAGGLE_WORKING_DIR", "/kaggle/working"))
+    if not working_dir.exists():
+        # Fallback to project root for local dev
+        working_dir = Path(__file__).parent.parent
+
+    return {"base": str(working_dir), "tree": _build_tree(working_dir)}
+
+
 @app.get("/stream")
 async def stream(request: Request):
     """SSE endpoint — streams AgentEvents to the frontend."""

@@ -1,26 +1,39 @@
 /**
- * KaggleClaw — Frontend SSE consumer and event renderer
+ * KaggleClaw — Frontend SSE consumer and event renderer (v2)
  * ES6 vanilla JS, no frameworks
+ *
+ * Harmony token channels (from harmony docs):
+ *   analysis → thinking (chain-of-thought)
+ *   final    → model final text output
+ *   commentary/call → tool calls
  */
 
-// ── State ──────────────────────────────────────────────────────
+// ── Globals ─────────────────────────────────────────────────────
 let eventSource = null;
 let stats = { turns: 0, tools: 0, events: 0 };
 let isAgentRunning = false;
 
-// Streaming text accumulation
-let activeTextCard = null;
-let activeThinkCard = null;
+// Active streaming cards — finalized when a new block starts
+let activeTextCard = null;   // "final" channel streaming card
+let activeThinkCard = null;  // "analysis" channel streaming card
 
-// ── Init ───────────────────────────────────────────────────────
+// ── Init ─────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
+  // Configure marked.js for proper rendering
+  marked.setOptions({
+    breaks: true,
+    gfm: true,
+    tables: true,
+  });
+
   loadCompetitionInfo();
   loadHealth();
   connectSSE();
   hljs.highlightAll();
+  loadFileTree();
 });
 
-// ── SSE Connection ─────────────────────────────────────────────
+// ── SSE Connection ───────────────────────────────────────────────
 function connectSSE() {
   if (eventSource) { eventSource.close(); }
 
@@ -31,17 +44,21 @@ function connectSSE() {
   };
 
   eventSource.onmessage = (e) => {
-    const data = JSON.parse(e.data);
-    handleEvent(data);
+    try {
+      const data = JSON.parse(e.data);
+      handleEvent(data);
+    } catch (err) {
+      console.warn('SSE parse error:', err);
+    }
   };
 
   eventSource.onerror = () => {
-    console.warn('[KaggleClaw] SSE connection lost, retrying...');
+    console.warn('[KaggleClaw] SSE connection lost, retrying in 3s...');
     setTimeout(connectSSE, 3000);
   };
 }
 
-// ── Event Router ───────────────────────────────────────────────
+// ── Event Router ────────────────────────────────────────────────
 function handleEvent(data) {
   if (data.type === 'ping') return;
 
@@ -53,11 +70,13 @@ function handleEvent(data) {
       renderThinking(data.content);
       break;
     case 'text':
+      // Ensure thinking is finalized before text
+      if (activeThinkCard) finalizeThinkCard();
       renderText(data.content);
       break;
     case 'tool_call':
       finalizeTextCard();
-      activeThinkCard = null;
+      finalizeThinkCard();
       renderToolCall(data.tool_name, data.content);
       stats.tools++;
       updateStats();
@@ -67,31 +86,31 @@ function handleEvent(data) {
       break;
     case 'error':
       finalizeTextCard();
-      activeThinkCard = null;
+      finalizeThinkCard();
       renderError(data.content, data.tool_name);
       break;
     case 'status':
       handleStatus(data.content, data.metadata);
       break;
     case 'done':
-      setStatus('done', 'Done');
+      finalizeTextCard();
+      finalizeThinkCard();
+      setStatus('done', '✅ Done');
       isAgentRunning = false;
       setTypingVisible(false);
+      setStopGenVisible(false);
       setBtnLoading(false);
-      finalizeTextCard();
-      activeThinkCard = null;
       break;
   }
 }
 
-// ── Renderers ──────────────────────────────────────────────────
+// ── Renderers ────────────────────────────────────────────────────
 
 function renderThinking(text) {
   hideFeedEmpty();
   if (!activeThinkCard) {
-    activeThinkCard = createCard('thinking', '🧠', 'Thinking', '', true);
+    activeThinkCard = createCard('thinking', '🧠', 'Reasoning', '', true);
   }
-  // Append to body
   const body = activeThinkCard.querySelector('.card-body');
   body.textContent += text;
   autoScroll();
@@ -99,31 +118,42 @@ function renderThinking(text) {
 
 function renderText(text) {
   hideFeedEmpty();
-  activeThinkCard = null; // A new block of text means thinking is done
   if (!activeTextCard) {
     activeTextCard = createCard('text', '💬', 'Agent', '', true);
     const body = activeTextCard.querySelector('.card-body');
     body.innerHTML = '<div class="md-content streaming-cursor"></div>';
   }
   const mdDiv = activeTextCard.querySelector('.md-content');
-  // accumulate raw text, re-render markdown
   mdDiv._raw = (mdDiv._raw || '') + text;
   mdDiv.innerHTML = marked.parse(mdDiv._raw);
   mdDiv.classList.add('streaming-cursor');
-  hljs.highlightAll();
+  // Re-highlight code blocks
+  mdDiv.querySelectorAll('pre code').forEach(block => {
+    if (!block.dataset.highlighted) {
+      hljs.highlightElement(block);
+      block.dataset.highlighted = 'yes';
+    }
+  });
   autoScroll();
 }
 
 function finalizeTextCard() {
   if (activeTextCard) {
     const mdDiv = activeTextCard.querySelector('.md-content');
-    if (mdDiv) mdDiv.classList.remove('streaming-cursor');
+    if (mdDiv) {
+      mdDiv.classList.remove('streaming-cursor');
+      // Final highlight pass
+      mdDiv.querySelectorAll('pre code:not([data-highlighted])').forEach(b => hljs.highlightElement(b));
+    }
     activeTextCard = null;
   }
 }
 
+function finalizeThinkCard() {
+  activeThinkCard = null;
+}
+
 function renderToolCall(toolName, args) {
-  finalizeTextCard();
   hideFeedEmpty();
   stats.turns++;
   updateStats();
@@ -131,11 +161,16 @@ function renderToolCall(toolName, args) {
   const card = createCard('tool-call', '🔧', 'Tool Call', toolName, true);
   const body = card.querySelector('.card-body');
 
-  // Syntax-highlighted code block
   const pre = document.createElement('pre');
   const code = document.createElement('code');
-  code.classList.add('language-python');
-  code.textContent = args || '(no arguments)';
+  code.classList.add('language-json');
+  // Try to pretty-print JSON args
+  try {
+    const parsed = JSON.parse(args);
+    code.textContent = JSON.stringify(parsed, null, 2);
+  } catch {
+    code.textContent = args || '(no arguments)';
+  }
   pre.appendChild(code);
   body.appendChild(pre);
   hljs.highlightElement(code);
@@ -145,7 +180,6 @@ function renderToolCall(toolName, args) {
 
 function renderToolResult(toolName, output) {
   hideFeedEmpty();
-  // Default: collapsed
   const card = createCard('tool-result', '📤', 'Tool Output', toolName, false);
   const body = card.querySelector('.card-body');
   body.textContent = output || '(empty)';
@@ -162,7 +196,7 @@ function renderError(msg, toolName) {
 
 function renderUserMsg(text) {
   finalizeTextCard();
-  activeThinkCard = null;
+  finalizeThinkCard();
   hideFeedEmpty();
   const card = createCard('user', '🙋', 'You', '', true);
   const body = card.querySelector('.card-body');
@@ -170,7 +204,7 @@ function renderUserMsg(text) {
   autoScroll();
 }
 
-// ── Card Factory ───────────────────────────────────────────────
+// ── Card Factory ────────────────────────────────────────────────
 function createCard(type, icon, label, toolName, openByDefault) {
   const card = document.createElement('div');
   card.className = `event-card ${type}`;
@@ -198,16 +232,18 @@ function createCard(type, icon, label, toolName, openByDefault) {
   return card;
 }
 
-// ── Status handling ────────────────────────────────────────────
+// ── Status Handling ──────────────────────────────────────────────
 function handleStatus(content, metadata) {
   if (content?.includes('Starting agent')) {
     setStatus('running', 'Running');
     isAgentRunning = true;
     setTypingVisible(true);
+    setStopGenVisible(true);
   } else if (content?.includes('cancelled')) {
     setStatus('idle', 'Idle');
     isAgentRunning = false;
     setTypingVisible(false);
+    setStopGenVisible(false);
     setBtnLoading(false);
   }
 
@@ -215,10 +251,11 @@ function handleStatus(content, metadata) {
     setStatus('done', '✅ Done');
     isAgentRunning = false;
     setTypingVisible(false);
+    setStopGenVisible(false);
     setBtnLoading(false);
   }
 
-  // Show status as a subtle inline item (not a full card)
+  // Only show non-trivial status messages
   if (content && content !== 'Calling model...') {
     const feed = document.getElementById('feed');
     const el = document.createElement('div');
@@ -229,12 +266,13 @@ function handleStatus(content, metadata) {
   }
 }
 
-// ── API Calls ──────────────────────────────────────────────────
+// ── API Calls ────────────────────────────────────────────────────
 async function startAgent() {
   if (isAgentRunning) return;
   isAgentRunning = true;
   setStatus('running', 'Starting...');
   setTypingVisible(true);
+  setStopGenVisible(true);
   setBtnLoading(true);
 
   try {
@@ -248,12 +286,14 @@ async function startAgent() {
       renderError(data.error);
       setStatus('error', 'Error');
       isAgentRunning = false;
+      setStopGenVisible(false);
       setBtnLoading(false);
     }
   } catch (e) {
     renderError(`Failed to start agent: ${e.message}`);
     setStatus('error', 'Error');
     isAgentRunning = false;
+    setStopGenVisible(false);
     setBtnLoading(false);
   }
 }
@@ -265,10 +305,11 @@ async function sendMessage() {
 
   input.value = '';
   finalizeTextCard();
-  activeThinkCard = null;
+  finalizeThinkCard();
   renderUserMsg(text);
 
   setTypingVisible(true);
+  setStopGenVisible(true);
   setStatus('running', 'Responding...');
 
   try {
@@ -279,25 +320,49 @@ async function sendMessage() {
     });
   } catch (e) {
     renderError(`Chat failed: ${e.message}`);
+    setStopGenVisible(false);
+  }
+}
+
+async function stopGeneration() {
+  try {
+    await fetch('/reset', { method: 'POST' });
+    finalizeTextCard();
+    finalizeThinkCard();
+    setTypingVisible(false);
+    setStopGenVisible(false);
+    setStatus('idle', 'Stopped');
+    isAgentRunning = false;
+    setBtnLoading(false);
+  } catch (e) {
+    console.warn('Stop failed:', e);
   }
 }
 
 async function resetAgent() {
-  if (!confirm('Reset the conversation and agent state?')) return;
+  if (!confirm('Full reset? This clears all conversation, stops all processes, and reloads the agent internally.')) return;
 
-  // Clear UI
+  // Reset UI immediately
   const feed = document.getElementById('feed');
   feed.innerHTML = '';
-  document.getElementById('feed-empty').style.display = '';
-  feed.appendChild(document.getElementById('feed-empty'));
+  const emptyEl = document.createElement('div');
+  emptyEl.className = 'feed-empty';
+  emptyEl.id = 'feed-empty';
+  emptyEl.innerHTML = `
+    <div class="empty-icon">⚡</div>
+    <div class="empty-title">KaggleClaw Ready</div>
+    <div class="empty-body">Agent has been reset. Fill in <code>competition.md</code> and click <strong>Start Agent</strong>.</div>
+  `;
+  feed.appendChild(emptyEl);
 
   stats = { turns: 0, tools: 0, events: 0 };
   updateStats();
   isAgentRunning = false;
   finalizeTextCard();
-  activeThinkCard = null;
+  finalizeThinkCard();
   setStatus('idle', 'Idle');
   setTypingVisible(false);
+  setStopGenVisible(false);
   setBtnLoading(false);
 
   try {
@@ -306,11 +371,75 @@ async function resetAgent() {
     console.warn('Reset failed:', e);
   }
 
-  // Reconnect SSE
+  // Reconnect SSE to fresh queue
   connectSSE();
 }
 
-// ── Sidebar Init ───────────────────────────────────────────────
+// ── File Tree ────────────────────────────────────────────────────
+async function loadFileTree() {
+  const treeEl = document.getElementById('file-tree');
+  const loadingEl = document.getElementById('file-tree-loading');
+  try {
+    const res = await fetch('/files');
+    if (!res.ok) throw new Error('No /files endpoint');
+    const data = await res.json();
+    if (loadingEl) loadingEl.style.display = 'none';
+    renderFileTree(treeEl, data.tree || []);
+  } catch (e) {
+    if (loadingEl) loadingEl.textContent = 'File tree unavailable';
+  }
+}
+
+function refreshFileTree() {
+  const treeEl = document.getElementById('file-tree');
+  const loadingEl = document.getElementById('file-tree-loading');
+  treeEl.innerHTML = '';
+  if (loadingEl) { loadingEl.style.display = ''; loadingEl.textContent = 'Loading...'; }
+  loadFileTree();
+}
+
+function renderFileTree(container, nodes, depth = 0) {
+  for (const node of nodes) {
+    if (node.type === 'dir') {
+      const wrapper = document.createElement('div');
+      const dirEl = document.createElement('div');
+      dirEl.className = 'ft-dir';
+      dirEl.innerHTML = `<span class="ft-dir-arrow">▶</span>📁 ${node.name}`;
+
+      const children = document.createElement('div');
+      children.className = 'ft-children hidden';
+      if (node.children && node.children.length > 0) {
+        renderFileTree(children, node.children, depth + 1);
+      }
+
+      dirEl.addEventListener('click', () => {
+        children.classList.toggle('hidden');
+        dirEl.querySelector('.ft-dir-arrow').classList.toggle('open');
+      });
+
+      wrapper.appendChild(dirEl);
+      wrapper.appendChild(children);
+      container.appendChild(wrapper);
+    } else {
+      const fileEl = document.createElement('div');
+      fileEl.className = 'ft-file';
+      const ext = node.name.split('.').pop();
+      const icon = getFileIcon(ext);
+      fileEl.innerHTML = `${icon} ${node.name}`;
+      container.appendChild(fileEl);
+    }
+  }
+}
+
+function getFileIcon(ext) {
+  const icons = {
+    py: '🐍', js: '📜', json: '📋', md: '📝', csv: '📊',
+    txt: '📄', html: '🌐', css: '🎨', ipynb: '📓', sh: '⚙️'
+  };
+  return icons[ext] || '📄';
+}
+
+// ── Sidebar Load ─────────────────────────────────────────────────
 async function loadCompetitionInfo() {
   try {
     const res = await fetch('/competition');
@@ -349,11 +478,11 @@ async function loadHealth() {
       pill.classList.remove('hidden');
     }
   } catch (e) {
-    // not a problem if health fails at load
+    // fine
   }
 }
 
-// ── UI Helpers ─────────────────────────────────────────────────
+// ── UI Helpers ───────────────────────────────────────────────────
 function hideFeedEmpty() {
   const el = document.getElementById('feed-empty');
   if (el) el.style.display = 'none';
@@ -367,6 +496,11 @@ function setStatus(type, text) {
 
 function setTypingVisible(visible) {
   const el = document.getElementById('typing-indicator');
+  el.classList.toggle('hidden', !visible);
+}
+
+function setStopGenVisible(visible) {
+  const el = document.getElementById('btn-stop-gen');
   el.classList.toggle('hidden', !visible);
 }
 
@@ -389,10 +523,15 @@ function updateStats() {
 
 function autoScroll() {
   const feed = document.getElementById('feed');
-  feed.scrollTop = feed.scrollHeight;
+  // Only auto-scroll if user is near the bottom
+  const threshold = 120;
+  const nearBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < threshold;
+  if (nearBottom) {
+    feed.scrollTop = feed.scrollHeight;
+  }
 }
 
-// ── Model Hosting ──────────────────────────────────────────────
+// ── Model Hosting ────────────────────────────────────────────────
 async function triggerHostModel() {
   const btn = document.getElementById('btn-host-model');
   const btnStop = document.getElementById('btn-stop-hosting');
@@ -403,9 +542,8 @@ async function triggerHostModel() {
     const res = await fetch('/host_model', { method: 'POST' });
     const data = await res.json();
     if (data.status === 'hosting_started' || data.status === 'already_hosting') {
-      btn.textContent = '✅ Model Hosted';
-      btn.classList.add('hidden'); // hide when hosted
-      if (btnStop) btnStop.classList.remove('hidden'); // show stop button
+      btn.classList.add('hidden');
+      if (btnStop) btnStop.classList.remove('hidden');
     } else {
       btn.textContent = '❌ Failed';
       btn.disabled = false;
@@ -429,7 +567,7 @@ async function triggerStopHosting() {
     btnStop.classList.add('hidden');
     btnStop.disabled = false;
     btnStop.textContent = 'Stop Hosting';
-    
+
     if (btnStart) {
       btnStart.classList.remove('hidden');
       btnStart.disabled = false;

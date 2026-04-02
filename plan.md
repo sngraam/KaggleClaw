@@ -65,3 +65,34 @@ this also show is mendatory
 correctly understad problem 
 
 correct the fronntend and backend issue show clearly what goning on every model ganrated text showing is mandatory 
+----
+
+Okay so setup is almost complete but those is adding is mandatory help me to add this setup
+
+- respone stop button (stop button located to send button in bottom)
+- correct the converation formate in frontend 
+    - so the converstion get longer it not show all text in screen , scolling not work, .md text not look like table and other thinks not show correctly 
+    - we can visite harmony doc https://developers.openai.com/cookbook/articles/openai-harmony look tokens ganration so you correctly extract thinking, tool call and final ganaration 
+    ```
+    <|channel|>analysis<|message|>User asks: "What is 2 + 2?" Simple arithmetic. Provide answer.<|end|>
+    <|start|>assistant<|channel|>final<|message|>2 + 2 = 4.<|return|>
+    ```
+    ```
+    Special Tokens
+
+The model uses a set of special tokens to identify the structure of your input. If you are using tiktoken these tokens are encoded in the o200k_harmony encoding. All special tokens follow the format <|type|>.
+Special token	Purpose	Token ID
+<|start|>	Indicates the beginning of a message. Followed by the “header” information of a message starting with the role	200006
+<|end|>	Indicates the end of a message	200007
+<|message|>	Indicates the transition from the message “header” to the actual content	200008
+<|channel|>	Indicates the transition to the channel information of the header	200005
+<|constrain|>	Indicates the transition to the data type definition in a tool call	200003
+<|return|>	Indicates the model is done with sampling the response message. A valid “stop token” indicating that you should stop inference.	200002
+<|call|>	Indicates the model wants to call a tool. A valid “stop token” indicating that you should stop inference.	200012
+```
+
+
+- adding a right side bar in that add a current project runing and small file setup show dir so we can interract how model 
+look and create file 
+
+- looking code for frontend what bug look wrong corect this with correct logic 

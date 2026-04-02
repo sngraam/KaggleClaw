@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KaggleClaw — Autonomous Kaggle Solver</title>
-  <meta name="description" content="KaggleClaw: An autonomous AI agent that solves Kaggle competitions using OSS-120B, powered by internet access, Python execution, and file tools." />
+  <meta name="description" content="KaggleClaw: An autonomous AI agent that solves Kaggle competitions using OSS-120B." />
 
   <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -19,7 +19,7 @@
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <!-- ── Header ────────────────────────────────────────────── -->
+  <!-- ── Header ─────────────────────────────── -->
   <header id="header">
     <div class="header-left">
       <div class="logo">
@@ -49,10 +49,10 @@
     </div>
   </header>
 
-  <!-- ── Layout ─────────────────────────────────────────────── -->
+  <!-- ── Layout ─────────────────────────────── -->
   <div id="layout">
 
-    <!-- Sidebar -->
+    <!-- Left Sidebar: Competition + Controls -->
     <aside id="sidebar">
       <div class="sidebar-section">
         <div class="sidebar-title">Competition</div>
@@ -68,12 +68,8 @@
 
       <div class="sidebar-section">
         <div class="sidebar-title">Controls</div>
-        <button id="btn-start" class="btn btn-primary" onclick="startAgent()">
-          ▶ Start Agent
-        </button>
-        <button id="btn-reset" class="btn btn-ghost" onclick="resetAgent()">
-          ↺ Reset
-        </button>
+        <button id="btn-start" class="btn btn-primary" onclick="startAgent()">▶ Start Agent</button>
+        <button id="btn-reset" class="btn btn-ghost" onclick="resetAgent()">↺ Full Reset</button>
       </div>
 
       <div class="sidebar-section">
@@ -84,7 +80,7 @@
       </div>
     </aside>
 
-    <!-- Main feed -->
+    <!-- Main Chat Feed -->
     <main id="feed-wrapper">
       <div id="feed">
         <div class="feed-empty" id="feed-empty">
@@ -108,12 +104,36 @@
             autocomplete="off"
             onkeydown="if(event.key==='Enter') sendMessage()"
           />
+          <button class="btn-stop-gen hidden" id="btn-stop-gen" onclick="stopGeneration()" title="Stop generation">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+          </button>
           <button class="btn btn-send" onclick="sendMessage()" id="btn-send">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           </button>
         </div>
       </div>
     </main>
+
+    <!-- Right Sidebar: File Tree -->
+    <aside id="file-sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title-row">
+          <span class="sidebar-title">Files</span>
+          <button class="icon-btn" onclick="refreshFileTree()" title="Refresh">↻</button>
+        </div>
+        <div id="file-tree-loading" class="file-tree-msg">Loading...</div>
+        <div id="file-tree" class="file-tree"></div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Working Dir</div>
+        <div class="dir-info">
+          <div class="dir-row"><span class="dir-icon">📁</span><span class="dir-path">/kaggle/working/</span></div>
+          <div class="dir-row"><span class="dir-icon">🧪</span><span class="dir-path">/kaggle/working/run/</span></div>
+          <div class="dir-row"><span class="dir-icon">📊</span><span class="dir-path">/kaggle/input/</span></div>
+        </div>
+      </div>
+    </aside>
 
   </div>
 
