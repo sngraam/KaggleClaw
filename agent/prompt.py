@@ -62,7 +62,7 @@ def build_messages() -> list:
         .with_conversation_start_date(today)
         # Built-in tools registered in system (not developer) per docs
         .with_python_tool()
-        .with_browser_tool()
+       # .with_browser_tool()
     )
 
     system_msg = Message.from_role_and_content(Role.SYSTEM, system_content)
