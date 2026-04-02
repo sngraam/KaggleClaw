@@ -52,7 +52,6 @@ class Server:
         )
     
         self._wait_for_server()
-        self._initialize_kernels()
     
     def _preload_model_weights(self) -> None:
     

@@ -390,6 +390,7 @@ function autoScroll() {
 // ── Model Hosting ──────────────────────────────────────────────
 async function triggerHostModel() {
   const btn = document.getElementById('btn-host-model');
+  const btnStop = document.getElementById('btn-stop-hosting');
   btn.disabled = true;
   btn.textContent = '⏳ Hosting...';
 
@@ -398,7 +399,8 @@ async function triggerHostModel() {
     const data = await res.json();
     if (data.status === 'hosting_started' || data.status === 'already_hosting') {
       btn.textContent = '✅ Model Hosted';
-      btn.classList.add('btn-ghost');
+      btn.classList.add('hidden'); // hide when hosted
+      if (btnStop) btnStop.classList.remove('hidden'); // show stop button
     } else {
       btn.textContent = '❌ Failed';
       btn.disabled = false;
@@ -407,6 +409,30 @@ async function triggerHostModel() {
   } catch (e) {
     btn.textContent = '❌ Failed';
     btn.disabled = false;
+    console.error(e);
+  }
+}
+
+async function triggerStopHosting() {
+  const btnStart = document.getElementById('btn-host-model');
+  const btnStop = document.getElementById('btn-stop-hosting');
+  btnStop.disabled = true;
+  btnStop.textContent = '⏳ Stopping...';
+
+  try {
+    await fetch('/stop_hosting', { method: 'POST' });
+    btnStop.classList.add('hidden');
+    btnStop.disabled = false;
+    btnStop.textContent = 'Stop Hosting';
+    
+    if (btnStart) {
+      btnStart.classList.remove('hidden');
+      btnStart.disabled = false;
+      btnStart.textContent = 'Host Model';
+    }
+  } catch (e) {
+    btnStop.textContent = '❌ Failed';
+    btnStop.disabled = false;
     console.error(e);
   }
 }

@@ -28,3 +28,16 @@ Now i introduct models/host.py that host model in notebook optimazed way like  p
 help me to build correct host model adding corner button "Host model or  Model Hosted" this help to see hosted model 
 
 correctly align data and api call though model using harmony and vllm , chat, browser , tool  check  every think and add correctly  
+
+
+---
+
+Error found 
+1. Agent loop error: Failed to create harmony client: cannot import name 'Client' from 'openai_harmony' (/usr/local/lib/python3.12/dist-packages/openai_harmony/__init__.py)
+2. Error starting server: 'Server' object has no attribute '_initialize_kernels'
+Task exception was never retrieved
+future: <Task finished name='Task-18' coro=<AgentRunner.send_user_message() done, defined at /kaggle/working/KaggleClaw/agent/run.py:148> exception=RuntimeError("Failed to create harmony client: cannot import name 'Client' from 'openai_harmony' (/usr/local/lib/python3.12/dist-packages/openai_harmony/__init__.py)")>
+
+3. when model hosting the corner button we added this add host model , hosting.. , model hosted (this dynamic after model hosted then show model hosted and stop hosting button)
+--
+check hormony doc and  correctly implemnt harmony and prompt addintion use internet to find  all this

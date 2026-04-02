@@ -41,14 +41,15 @@ class AgentEvent:
 # ── Harmony client ─────────────────────────────────────────────────────────────
 
 def _get_harmony_client():
-    """Lazily import + create the openai_harmony client pointed at the local model."""
+    """Lazily import + create the openai client pointed at the local model."""
     try:
-        from openai_harmony import Client
+        from openai import AsyncOpenAI
         base_url = os.environ.get("HARMONY_BASE_URL", "http://localhost:8080/v1")
-        api_key = os.environ.get("HARMONY_API_KEY", "kaggleclaw-local")
-        return Client(base_url=base_url, api_key=api_key)
+        # kaggleclaw-local or actual empty depending on vLLM, standard is just any string or EMPTY
+        api_key = os.environ.get("HARMONY_API_KEY", "EMPTY")
+        return AsyncOpenAI(base_url=base_url, api_key=api_key)
     except Exception as e:
-        raise RuntimeError(f"Failed to create harmony client: {e}") from e
+        raise RuntimeError(f"Failed to create openai client for vLLM: {e}") from e
 
 
 # ── Conversation message builders ──────────────────────────────────────────────
@@ -83,9 +84,8 @@ async def stream_completion(
     event_queue: asyncio.Queue | None = None,
 ) -> AsyncIterator[Message]:
     """
-    Stream a completion from the harmony model.
-    Yields complete messages for tool routing.
-    Pushes AgentEvents to event_queue for SSE streaming.
+    Stream a completion from the harmony model using standard chat completions.
+    vLLM will handle harmony formatting.
     """
     client = _get_harmony_client()
 
@@ -96,47 +96,51 @@ async def stream_completion(
     await _emit(AgentEvent(type="status", content="Calling model..."))
 
     try:
-        # Use harmony's streaming completion
         full_text = ""
-        thinking_text = ""
-        in_thinking = False
+        # Need to convert Harmony Messages to standard dicts
+        standard_msgs = []
+        for msg in messages:
+            role = str(msg.author.role.value).lower()
+            if role == "developer": role = "system" # developer is system
+            
+            # extract text
+            text_parts = [c.text for c in msg.content if isinstance(c, TextContent) and hasattr(c, "text")]
+            standard_msgs.append({"role": role, "content": "".join(text_parts)})
 
-        async for chunk in client.stream_completion(
-            messages=messages,
+        stream = await client.chat.completions.create(
             model=model,
-            tool_configs=tool_config or [],
-        ):
-            # Handle thinking tokens
-            if hasattr(chunk, "thinking") and chunk.thinking:
-                thinking_text += chunk.thinking
-                in_thinking = True
-                await _emit(AgentEvent(type="thinking", content=chunk.thinking))
+            messages=standard_msgs,
+            stream=True,
+            # tools=tool_config if tool_config else None  # Assuming vllm supports tools or we handle manually
+        )
 
-            # Handle text tokens
-            if hasattr(chunk, "text") and chunk.text:
-                full_text += chunk.text
-                await _emit(AgentEvent(type="text", content=chunk.text))
+        async for chunk in stream:
+            delta = chunk.choices[0].delta
+            
+            if hasattr(delta, "content") and delta.content:
+                full_text += delta.content
+                await _emit(AgentEvent(type="text", content=delta.content))
+                
+            # If tool calls are supported via standard vllm streaming:
+            if hasattr(delta, "tool_calls") and delta.tool_calls:
+                for tcall in delta.tool_calls:
+                    if hasattr(tcall, "function") and tcall.function:
+                        # stream the tool call args
+                        args = tcall.function.arguments or ""
+                        await _emit(AgentEvent(
+                            type="tool_call",
+                            tool_name=tcall.function.name if hasattr(tcall.function, "name") and tcall.function.name else "",
+                            content=args
+                        ))
 
-            # Handle tool call chunks
-            if hasattr(chunk, "tool_call") and chunk.tool_call:
-                tool_name = getattr(chunk.tool_call, "name", "")
-                tool_args = getattr(chunk.tool_call, "arguments", "")
-                await _emit(AgentEvent(
-                    type="tool_call",
-                    tool_name=tool_name,
-                    content=tool_args,
-                ))
-
-        # Build and yield the final assistant message
-        if full_text or thinking_text:
-            content_text = full_text or thinking_text
-            msg = assistant_message(content_text)
-            yield msg
+        if full_text:
+            yield assistant_message(full_text)
 
     except Exception as e:
         err_msg = f"Model error: {e}"
         await _emit(AgentEvent(type="error", content=err_msg))
         raise
+
 
 
 async def emit_tool_result(

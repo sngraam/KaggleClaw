@@ -8,8 +8,8 @@ Endpoints:
   POST /chat        — send a message to the agent
   POST /reset       — reset conversation
   GET  /health      — status + public URL
-  GET  /competition — competition info for sidebar
   POST /host_model  — triggers local vLLM hosting
+  POST /stop_hosting — gracefully terminates local vLLM server
 """
 
 import asyncio
@@ -199,3 +199,20 @@ async def host_model():
     asyncio.create_task(run_in_threadpool(_start_server))
     
     return {"status": "hosting_started"}
+
+
+@app.post("/stop_hosting")
+async def stop_hosting():
+    """Stop the local vLLM server if it is running."""
+    if state.vllm_server:
+        try:
+            # Assumes models/host.py has server_process to kill
+            if hasattr(state.vllm_server, "server_process") and state.vllm_server.server_process:
+                state.vllm_server.server_process.terminate()
+                state.vllm_server.server_process.wait(timeout=10)
+        except Exception as e:
+            print(f"Error stopping vLLM: {e}")
+        finally:
+            state.vllm_server = None
+            return {"status": "hosted_stopped"}
+    return {"status": "not_hosting"}
