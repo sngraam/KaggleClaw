@@ -89,8 +89,7 @@ def user_message(text: str) -> Message:
     return Message(
         author=Author(role=Role.USER),
         content=[TextContent(text=text)],
-    ).with_recipient("assistant")
-
+    )
 
 def system_message(text: str) -> Message:
     if not _HARMONY_AVAILABLE:
@@ -98,8 +97,7 @@ def system_message(text: str) -> Message:
     return Message(
         author=Author(role=Role.SYSTEM),
         content=[SystemContent(model_identity=text)],
-    ).with_recipient("assistant")
-
+    )
 
 def assistant_message(text: str, channel: str = "final") -> Message:
     if not _HARMONY_AVAILABLE:
