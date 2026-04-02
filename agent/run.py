@@ -176,7 +176,6 @@ class AgentRunner:
         In the harmony format:
           - channel='analysis' → chain-of-thought, skip (already emitted as thinking)
           - channel='final'    → user-facing answer, keep in history
-          - recipient=<tool>   → tool call, process with the tool
 
         Returns True if at least one tool was called.
         """

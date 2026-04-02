@@ -30,6 +30,8 @@ try:
         TextContent,
         DeveloperContent,
         SystemContent,
+        ReasoningEffort,
+        ToolNamespaceConfig,
     )
     _HARMONY_AVAILABLE = True
 except ImportError:
@@ -84,30 +86,21 @@ class AgentEvent:
 # ── Message builders ────────────────────────────────────────────────────────────
 
 def user_message(text: str) -> Message:
-    if not _HARMONY_AVAILABLE:
-        return Message(Author(Role.USER), [TextContent(text)], recipient="assistant")
-    return Message(
-        author=Author(role=Role.USER),
-        content=[TextContent(text=text)],
-    )
+    return Message.from_role_and_content(Role.USER, TextContent(text))
 
 def system_message(text: str) -> Message:
-    if not _HARMONY_AVAILABLE:
-        return Message(Author(Role.SYSTEM), [TextContent(text)], recipient="assistant")
-    return Message(
-        author=Author(role=Role.SYSTEM),
-        content=[SystemContent(model_identity=text)],
+    system = (
+        SystemContent.new()
+        .with_model_identity(text)
+        .with_reasoning_effort(ReasoningEffort.HIGH)
+        .with_tools(ToolNamespaceConfig.python())
+        .with_tools(ToolNamespaceConfig.browser())
     )
 
-def assistant_message(text: str, channel: str = "final") -> Message:
-    if not _HARMONY_AVAILABLE:
-        return Message(Author(Role.ASSISTANT), [TextContent(text)], channel=channel, recipient="assistant")
-    return Message(
-        author=Author(role=Role.ASSISTANT),
-        content=[TextContent(text=text)],
-        channel=channel,
-    ).with_recipient("assistant")
+    return Message.from_role_and_content(Role.SYSTEM, system)
 
+def assistant_message(text: str, channel: str = "final") -> Message:
+    return Message.from_role_and_content(Role.ASSISTANT, TextContent(text))
 
 # ── OpenAI async client ────────────────────────────────────────────────────────
 
@@ -198,7 +191,7 @@ async def stream_completion(
             model=model,
             prompt=prompt_token_ids,   # vLLM accepts list of token IDs as prompt
             stream=True,
-            max_tokens=4096,
+            max_tokens=65556,
             stop=None,                 # harmony uses its own stop tokens within the model
             temperature=1.0,
         )

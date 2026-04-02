@@ -6,8 +6,8 @@ Reads competition.md and injects it along with tool docs and working directories
 from pathlib import Path
 
 
-WORKING_DIR = "/kaggle/working"
-RUN_DIR = "/kaggle/working/run"
+WORKING_DIR = "/kaggle/working/KaggleClaw/"
+RUN_DIR = "/kaggle/working/KaggleClaw/run"
 INPUT_DIR = "/kaggle/input"
 
 
