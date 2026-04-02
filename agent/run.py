@@ -1,44 +1,36 @@
 """
-agent/run.py — Main KaggleClaw agent loop.
+agent/run.py — KaggleClaw agent loop.
 
-Orchestrates the multi-turn conversation between:
-  - The OSS-120B model (via openai_harmony / harmony.py)
-  - Available tools (browser, python, file, apply_patch)
-  - The SSE event queue (consumed by FastAPI /stream endpoint)
+Orchestrates the multi-turn conversation following Harmony history rules:
 
-Usage:
-    from agent.run import AgentRunner
-    runner = AgentRunner(event_queue=queue)
-    await runner.run(initial_message="Start solving the competition.")
+  • After a turn ending in a FINAL answer:
+      → Drop all analysis messages from that turn.
+      → Keep only the single final message in history.
+
+  • After a turn ending in a TOOL CALL:
+      → Keep the full chain: analysis + commentary call + tool result.
+      → This is necessary so the model can continue its chain-of-thought.
+
+  • Tool result messages are built with tool_result_message() which sets
+    Author(TOOL, tool_name), channel="commentary", recipient="assistant".
 """
 
 import asyncio
 import os
 from typing import Any
 
-from openai_harmony import (
-    Author,
-    Message,
-    Role,
-    TextContent,
-)
-
 from .harmony import (
     AgentEvent,
-    assistant_message,
-    stream_completion,
-    system_message,
-    user_message,
     emit_tool_result,
+    extract_text,
+    stream_completion,
+    tool_result_message,
+    user_message,
 )
-from .prompt import build_system_prompt
+from .prompt import build_messages
 
-
-# Model to use — overridable via env var
 MODEL_NAME = os.environ.get("MODEL_NAME", "oss-120b")
-
-# Maximum turns before forcing a stop (safety net)
-MAX_TURNS = 50
+MAX_TURNS  = 50
 
 
 class AgentRunner:
@@ -53,41 +45,37 @@ class AgentRunner:
         model: str = MODEL_NAME,
     ):
         self.event_queue = event_queue
-        self.model = model
-        self.tools = tools or []
+        self.model       = model
+        self.tools       = tools or []
         self._tool_map: dict[str, Any] = {t.name: t for t in self.tools}
-        self._messages: list[Message] = []
+        self._messages: list = []
         self._running = False
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     @property
-    def messages(self) -> list[Message]:
+    def messages(self) -> list:
         return list(self._messages)
 
     def reset(self):
         self._messages = []
-        self._running = False
-
-    async def add_user_message(self, text: str):
-        """Inject a user message during an ongoing session."""
-        msg = user_message(text)
-        self._messages.append(msg)
+        self._running  = False
 
     async def run(self, initial_message: str | None = None):
         """
         Start (or continue) the agent loop.
-        If initial_message is provided, it's appended before the loop begins.
+        Injects system+developer messages on first run.
         """
         if not self._messages:
-            # First run: inject system prompt
-            sys_msg = system_message(build_system_prompt())
-            self._messages.append(sys_msg)
+            # First run: inject properly structured system + developer messages
+            self._messages.extend(build_messages())
 
         if initial_message:
-            msg = user_message(initial_message)
-            self._messages.append(msg)
-            await self._emit(AgentEvent(type="status", content=f"Starting agent with: {initial_message[:100]}"))
+            self._messages.append(user_message(initial_message))
+            await self._emit(AgentEvent(
+                type="status",
+                content=f"Starting: {initial_message[:120]}"
+            ))
 
         self._running = True
         turn = 0
@@ -97,44 +85,74 @@ class AgentRunner:
                 turn += 1
                 await self._emit(AgentEvent(type="status", content=f"Turn {turn}"))
 
-                # — Generate model response —
-                msgs_in_turn =[]
+                # ── Stream one completion ──────────────────────────────────────
+                turn_messages: list = []
 
                 async for msg in stream_completion(
                     messages=self._messages,
                     model=self.model,
-                    tool_config=[t.tool_config if hasattr(t, "tool_config") else None
-                                 for t in self.tools],
                     event_queue=self.event_queue,
                 ):
-                    msgs_in_turn.append(msg)
-                    # We append to history immediately so history retains the 'analysis' thoughts
-                    self._messages.append(msg)
+                    turn_messages.append(msg)
 
-                if not msgs_in_turn:
-                    await self._emit(AgentEvent(type="error", content="Model returned no response."))
+                if not turn_messages:
+                    await self._emit(AgentEvent(type="error", content="Model returned nothing."))
                     break
 
-                # — Check for terminal signals —
-                # Combine text strings of all events output in this specific turn
-                response_text = "\n".join(self._extract_text(m) for m in msgs_in_turn)
+                # ── Determine how this turn ended ──────────────────────────────
+                # Find the last non-analysis message
+                last_msg = turn_messages[-1]
+                last_channel = getattr(last_msg, "channel", None) or "final"
+                last_recipient = (
+                    getattr(last_msg, "recipient", None) or
+                    getattr(last_msg, "_recipient", None)
+                )
 
-                if "SUBMISSION READY" in response_text:
+                # Detect tool call: last message has a non-assistant recipient
+                is_tool_call = (
+                    last_recipient is not None
+                    and str(last_recipient) not in ("assistant", "None", "", "NoneType")
+                )
+
+                # ── Update conversation history ────────────────────────────────
+                if is_tool_call:
+                    # TOOL CALL: keep all messages (analysis + call)
+                    # The model needs the full chain to continue reasoning
+                    self._messages.extend(turn_messages)
+                else:
+                    # FINAL ANSWER: drop analysis, keep only the final message
+                    # Per docs: "drop any previous CoT content on subsequent sampling
+                    # if the responses ended in a message to the final channel"
+                    final_msgs = [
+                        m for m in turn_messages
+                        if getattr(m, "channel", None) == "final"
+                    ]
+                    if final_msgs:
+                        self._messages.extend(final_msgs)
+                    else:
+                        # No final message found — keep last message anyway
+                        self._messages.append(last_msg)
+
+                # ── Check for completion signal ────────────────────────────────
+                all_text = "\n".join(extract_text(m) for m in turn_messages)
+                if "SUBMISSION READY" in all_text:
                     await self._emit(AgentEvent(
                         type="status",
-                        content="✅ Agent completed! Submission ready.",
+                        content="✅ Competition solved! Submission ready.",
                         metadata={"done": True},
                     ))
                     self._running = False
                     break
 
-                # — Route tool calls if any —
-                routed = await self._route_tool_calls(self._messages)
-                if not routed:
-                    if turn >= 2:
-                        await self._emit(AgentEvent(type="done", content="Agent turn complete."))
+                # ── Route tool calls ───────────────────────────────────────────
+                if is_tool_call:
+                    routed = await self._route_tool_call(last_msg)
+                    if not routed:
+                        await self._emit(AgentEvent(type="done", content="Turn complete."))
+                        self._running = False
+                else:
+                    await self._emit(AgentEvent(type="done", content="Turn complete."))
                     self._running = False
-                    break
 
         except asyncio.CancelledError:
             self._running = False
@@ -145,13 +163,10 @@ class AgentRunner:
             raise
 
     async def send_user_message(self, text: str):
-        """
-        Send a message from the user and resume the agent loop.
-        Call this while the agent is idle (not running).
-        """
+        """Send a user message while agent is idle, then resume the loop."""
         msg = user_message(text)
         self._messages.append(msg)
-        await self._emit(AgentEvent(type="text", content=f"**User:** {text}", tool_name="user"))
+        await self._emit(AgentEvent(type="text", content=text, tool_name="user"))
         await self.run()
 
     # ── Internal helpers ───────────────────────────────────────────────────────
@@ -159,63 +174,64 @@ class AgentRunner:
     async def _emit(self, event: AgentEvent):
         await self.event_queue.put(event)
 
-    def _extract_text(self, msg: Message) -> str:
-        if not msg.content:
-            return ""
-        parts = []
-        for item in msg.content:
-            if hasattr(item, "text") and item.text:
-                parts.append(item.text)
-        return "\n".join(parts)
-
-    async def _route_tool_calls(self, messages: list[Message]) -> bool:
+    async def _route_tool_call(self, msg) -> bool:
         """
-        Route tool calls based on harmony message channel and recipient.
+        Execute the tool call encoded in msg and append the result to history.
 
-        In the harmony format:
-          - channel='analysis' → chain-of-thought, skip (already emitted as thinking)
-          - channel='final'    → user-facing answer, keep in history
-
-        Returns True if at least one tool was called.
+        Returns True if a tool was called, False if the recipient was unknown.
         """
-        last_msg = messages[-1]
-        tool_called = False
-
-        # Get channel and recipient from harmony message
-        channel = getattr(last_msg, "channel", None)
-        recipient = getattr(last_msg, "recipient", None)
+        recipient = (
+            getattr(msg, "recipient", None) or
+            getattr(msg, "_recipient", None)
+        )
         if not recipient:
-            recipient = getattr(last_msg, "_recipient", None)
-
-        # Skip analysis (thinking) messages — they are not tool calls
-        if channel == "analysis":
             return False
 
-        # If recipient is the name of a registered tool, call it
-        if recipient and str(recipient) in self._tool_map:
-            tool = self._tool_map[str(recipient)]
-            tool_name = tool.name
-            args_text = self._extract_text(last_msg)
+        recipient_str = str(recipient)
 
+        # Built-in tools: python / browser.* — handled by the tool objects
+        # Custom function tools: file, apply_patch (via functions.file etc.)
+        # Strip "functions." prefix if present
+        tool_key = recipient_str.removeprefix("functions.")
+
+        # Also handle "python" and "browser.*" as built-in names
+        if tool_key.startswith("browser."):
+            tool_key = "browser"
+
+        tool = self._tool_map.get(tool_key)
+        if not tool:
             await self._emit(AgentEvent(
-                type="tool_call",
-                tool_name=tool_name,
-                content=args_text,
+                type="error",
+                content=f"Unknown tool: {recipient_str}",
+                tool_name=recipient_str,
             ))
+            return False
 
-            try:
-                tool_responses = []
-                async for response_msg in tool.process(last_msg):
-                    tool_responses.append(response_msg)
-                    output = self._extract_text(response_msg)
-                    await emit_tool_result(tool_name, output, self.event_queue)
-                    self._messages.append(response_msg)
-                tool_called = bool(tool_responses)
-            except Exception as e:
-                err = f"[TOOL ERROR] {tool_name}: {e}"
-                await self._emit(AgentEvent(type="error", content=err, tool_name=tool_name))
-                if hasattr(tool, "error_message"):
-                    self._messages.append(tool.error_message(err))
-                tool_called = True
+        args_text = extract_text(msg)
 
-        return tool_called
+        await self._emit(AgentEvent(
+            type="tool_call",
+            tool_name=recipient_str,
+            content=args_text,
+        ))
+
+        try:
+            tool_responses = []
+            async for response_msg in tool.process(msg):
+                tool_responses.append(response_msg)
+                output = extract_text(response_msg)
+                await emit_tool_result(recipient_str, output, self.event_queue)
+
+                # Build correct harmony tool result message and add to history
+                result_msg = tool_result_message(recipient_str, output)
+                self._messages.append(result_msg)
+
+            return bool(tool_responses)
+
+        except Exception as e:
+            err = f"[TOOL ERROR] {recipient_str}: {e}"
+            await self._emit(AgentEvent(type="error", content=err, tool_name=recipient_str))
+            # Inject error as tool result so model knows what happened
+            result_msg = tool_result_message(recipient_str, err)
+            self._messages.append(result_msg)
+            return True  # We attempted the call; let the model continue

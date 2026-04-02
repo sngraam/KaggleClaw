@@ -156,7 +156,7 @@ async def stream_completion(
             prompt=prompt_token_ids,
             stream=True,
             max_tokens=16256,
-            logprobs=1, 
+            logprobs=5, 
             stop=None,
             temperature=1.0,
         )

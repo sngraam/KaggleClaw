@@ -1,17 +1,24 @@
 """
-agent/prompt.py — Builds the system prompt for the OSS-120B agent.
-Reads competition.md and injects it along with tool docs and working directories.
+agent/prompt.py — Builds correctly structured Harmony messages for KaggleClaw.
+
+Per official docs:
+  system    → SystemContent: identity, dates, reasoning level, built-in tools
+  developer → DeveloperContent: instructions (the real "system prompt") +
+              optional custom function tools
+
+Built-in tools (python / browser) belong in the SYSTEM message, NOT developer.
+Custom function tools belong in the DEVELOPER message.
 """
 
+from datetime import date
 from pathlib import Path
 
+WORKING_DIR = "/kaggle/working/KaggleClaw"
+RUN_DIR     = "/kaggle/working/KaggleClaw/run"
+INPUT_DIR   = "/kaggle/input"
 
-WORKING_DIR = "/kaggle/working/KaggleClaw/"
-RUN_DIR = "/kaggle/working/KaggleClaw/run"
-INPUT_DIR = "/kaggle/input"
 
-
-def _read_file_safe(path: str) -> str:
+def _read_safe(path: str) -> str:
     try:
         return Path(path).read_text(encoding="utf-8")
     except Exception:
@@ -19,19 +26,102 @@ def _read_file_safe(path: str) -> str:
 
 
 def _load_competition_context() -> str:
-    # Try Kaggle working dir first, then local
     for p in [f"{WORKING_DIR}/competition.md", "competition.md"]:
-        content = _read_file_safe(p)
+        content = _read_safe(p)
         if content != "[file not found]":
             return content
     return "[competition.md not found — please create it]"
 
 
-def build_system_prompt() -> str:
-    competition_ctx = _load_competition_context()
+def build_messages() -> list:
+    """
+    Build the initial [system, developer] message list for a new agent session.
 
-    return f"""You are KaggleClaw, an elite autonomous machine learning agent built to win Kaggle competitions.
-You have been granted full authority to use all available tools to understand the competition, explore the data, build models, evaluate, and iterate — without asking for permission.
+    Returns a list of Message objects ready to be passed to render_conversation().
+    """
+    try:
+        from openai_harmony import (
+            Message, Role, SystemContent, DeveloperContent,
+            ReasoningEffort, ToolNamespaceConfig, ToolDescription,
+        )
+    except ImportError:
+        # Fallback: plain text messages if library not available
+        return _build_plain_messages()
+
+    competition_ctx = _load_competition_context()
+    today = date.today().isoformat()
+
+    # ── System message ─────────────────────────────────────────────────────────
+    # Must contain: identity, dates, reasoning, channels, built-in tools
+    system_content = (
+        SystemContent.new()
+        .with_model_identity(
+            "You are KaggleClaw, an elite autonomous ML agent built to win Kaggle competitions."
+        )
+        .with_reasoning_effort(ReasoningEffort.HIGH)
+        .with_conversation_start_date(today)
+        # Built-in tools registered in system (not developer) per docs
+        .with_python_tool()
+        .with_browser_tool()
+    )
+
+    system_msg = Message.from_role_and_content(Role.SYSTEM, system_content)
+
+    # ── Developer message ──────────────────────────────────────────────────────
+    # This is the actual "system prompt" — instructions + file/patch tools
+    instructions = _build_instructions(competition_ctx)
+
+    # Custom tools: file and apply_patch go here as function tools
+    file_tool = ToolDescription.new(
+        "file",
+        "Read, write, list, delete, move files in /kaggle/working/. "
+        "Commands: read <path>, write <path>\\n<content>, list [path], "
+        "delete <path>, mkdir <path>, exists <path>, move <src> <dst>",
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "Full command string, e.g. 'read /kaggle/working/submission.csv' "
+                        "or 'write /kaggle/working/model.py\\nimport pandas...'"
+                    ),
+                }
+            },
+            "required": ["command"],
+        },
+    )
+
+    patch_tool = ToolDescription.new(
+        "apply_patch",
+        "Apply a unified diff patch to an existing file in /kaggle/working/. "
+        "Use for surgical edits without rewriting the whole file.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "type": "string",
+                    "description": "A valid unified diff patch string",
+                }
+            },
+            "required": ["patch"],
+        },
+    )
+
+    developer_content = (
+        DeveloperContent.new()
+        .with_instructions(instructions)
+        .with_function_tools([file_tool, patch_tool])
+    )
+
+    developer_msg = Message.from_role_and_content(Role.DEVELOPER, developer_content)
+
+    return [system_msg, developer_msg]
+
+
+def _build_instructions(competition_ctx: str) -> str:
+    return f"""You are KaggleClaw — an elite, autonomous machine learning agent built to win Kaggle competitions.
+You have full authority to use all available tools without asking for permission.
 
 ═══════════════════════════════════════
 COMPETITION CONTEXT
@@ -39,91 +129,99 @@ COMPETITION CONTEXT
 {competition_ctx}
 
 ═══════════════════════════════════════
-YOUR WORKING ENVIRONMENT
+WORKING ENVIRONMENT
 ═══════════════════════════════════════
-- Working directory: {WORKING_DIR}/
-  This is where you create all scripts, notebooks, models, and submissions.
-- Experiments directory: {RUN_DIR}/
-  Use this for quick test scripts and experiments. Disposable code goes here.
-- Dataset directory: {INPUT_DIR}/
-  Read-only. Competition datasets are here. Do NOT write here.
-- Metrics evaluator: {WORKING_DIR}/metrics.py
-  Import and call `evaluate(y_true, y_pred)` or `score_submission(...)` to self-assess.
+- Working directory : {WORKING_DIR}/
+- Experiments dir   : {RUN_DIR}/    (disposable experiments)
+- Dataset dir       : {INPUT_DIR}/  (read-only — competition data)
+- Metrics evaluator : {WORKING_DIR}/metrics.py
+  Call evaluate(y_true, y_pred) or score_submission(...) to self-assess.
 
 ═══════════════════════════════════════
 YOUR TOOLS
 ═══════════════════════════════════════
-You have access to:
+1. python       — Execute Python in a persistent Jupyter kernel.
+                  Variables and state persist across calls.
+                  Use for EDA, training, evaluation, submission generation.
 
-1. **python** — Execute Python code in a stateful Jupyter kernel.
-   - The kernel is persistent across calls. Variables, imports, and state are retained.
-   - Use this for EDA, model training, feature engineering, evaluation, submission generation.
-   - All file I/O goes through `/kaggle/working/`.
+2. browser      — Browse the web. Research techniques, papers, Kaggle discussions,
+                  top public notebooks for this competition.
 
-2. **browser** — Browse the internet (search, open URLs, find text).
-   - Use this to research competition-specific techniques, read papers, look up Kaggle discussions.
-   - Check public notebooks and leaderboard tricks for this competition.
+3. file         — Read/write/list/delete files in /kaggle/working/.
+                  (Custom function tool — calls go to commentary channel)
 
-3. **file** — Read, write, list, and delete files in `/kaggle/working/`.
-   - Use this to inspect files, write scripts, save intermediate results.
-
-4. **apply_patch** — Apply structured diffs to existing files.
-   - Use this to make precise edits to Python scripts without rewriting the whole file.
+4. apply_patch  — Apply unified diffs to files. Surgical edits without rewrite.
+                  (Custom function tool — calls go to commentary channel)
 
 ═══════════════════════════════════════
-HOW TO WIN
+HOW TO WIN — AGENTIC LOOP
 ═══════════════════════════════════════
-Follow this agentic loop. Think deep, iterate fast:
-
 STEP 1 — UNDERSTAND
-  • Read competition.md thoroughly.
-  • Use `python` to inspect the dataset (shape, dtypes, head, value counts, missing values).
-  • Use `browser` to research the competition topic, top public notebooks, and discussion threads.
+  • Read competition.md. Understand the metric (higher vs lower is better).
+  • Use python to inspect the dataset: shape, dtypes, head, missing values.
+  • Use browser to research the competition, top notebooks, discussions.
 
 STEP 2 — BASELINE
-  • Build a simple baseline quickly (e.g. logistic regression, decision tree, mean predictor).
-  • Generate a submission file at `/kaggle/working/submission_baseline.csv`.
-  • Evaluate with `metrics.py`. Know your baseline score.
+  • Build a quick baseline (logistic regression, mean predictor, decision tree).
+  • Save submission to /kaggle/working/submission_baseline.csv.
+  • Score it with metrics.py. Know your starting point.
 
 STEP 3 — ITERATE
-  • Try better features, encodings, models (XGBoost, LightGBM, CatBoost, deep learning).
-  • Cross-validate properly (StratifiedKFold, GroupKFold, time-based split — match competition rules).
-  • Evaluate every iteration with metrics.py. Only keep changes that improve score.
-  • Save scripts in `/kaggle/working/` with clear names (e.g. `lgbm_v1.py`, `feature_eng_v2.py`).
+  • Try better features and models (XGBoost, LightGBM, CatBoost, neural nets).
+  • Cross-validate properly (StratifiedKFold, time-based split as appropriate).
+  • Score every iteration. Only keep changes that improve the metric.
+  • Name scripts clearly: lgbm_v1.py, feature_eng_v2.py, etc.
 
 STEP 4 — OPTIMIZE
-  • Tune hyperparameters (Optuna, grid search).
-  • Engineer domain-specific features. Use browser to research domain knowledge.
+  • Hyperparameter tuning (Optuna preferred).
+  • Domain-specific features — use browser to research domain knowledge.
   • Ensemble/stack top models.
 
 STEP 5 — FINALIZE
-  • Write final submission to `/kaggle/working/submission_final.csv`.
-  • Verify the submission format matches `sample_submission.csv`.
-  • Print your final cross-validation score.
-  • Say: "SUBMISSION READY: /kaggle/working/submission_final.csv — CV Score: X.XXXX"
+  • Write final submission to /kaggle/working/submission_final.csv.
+  • Verify the format matches sample_submission.csv exactly.
+  • Print your best CV score.
+  • End your response with:
+    SUBMISSION READY: /kaggle/working/submission_final.csv — CV Score: X.XXXX
 
 ═══════════════════════════════════════
-THINKING & REASONING RULES
+REASONING & BEHAVIOUR
 ═══════════════════════════════════════
-- Think out loud. Explain your reasoning before each tool call.
-- After each tool result, interpret what you learned and decide the next step.
-- Be iterative. If something fails, debug and retry.
-- Prefer correctness over speed. But also — keep moving.
-- Never hallucinate data. Always verify with actual tool calls.
-
-Let's win this competition.
+- Think carefully in your analysis channel before acting.
+- After every tool result, interpret what you learned and plan the next step.
+- Debug failures and retry. Be iterative.
+- Never hallucinate data — always verify with actual tool calls.
+- Prefer correctness over speed, but keep moving.
 """
 
 
+def _build_plain_messages() -> list:
+    """Fallback plain-text messages when openai_harmony is not installed."""
+    try:
+        from openai_harmony import Message, Role
+    except ImportError:
+        # Use stubs from harmony.py
+        from .harmony import user_message
+        # Just return a single user-style context injection
+        ctx = _load_competition_context()
+        return [user_message(f"[SYSTEM] {_build_instructions(ctx)}")]
+
+    competition_ctx = _load_competition_context()
+    return [
+        Message.from_role_and_content(Role.SYSTEM, _build_instructions(competition_ctx))
+    ]
+
+
+# ── Frontend sidebar helper ────────────────────────────────────────────────────
+
 def build_competition_summary() -> dict:
-    """Returns structured competition info for the frontend sidebar."""
+    """Return structured competition info for the frontend sidebar."""
     ctx = _load_competition_context()
     lines = ctx.splitlines()
 
     def extract_field(label: str) -> str:
         for i, line in enumerate(lines):
             if line.strip().startswith(f"## {label}"):
-                # grab next non-empty, non-comment line
                 for j in range(i + 1, min(i + 6, len(lines))):
                     l = lines[j].strip()
                     if l and not l.startswith("<!--") and not l.startswith("```"):
@@ -131,10 +229,10 @@ def build_competition_summary() -> dict:
         return "—"
 
     return {
-        "name": extract_field("Name"),
-        "metric": extract_field("Evaluation Metric"),
-        "task": extract_field("Task Type"),
-        "target": extract_field("Target Column"),
+        "name":     extract_field("Name"),
+        "metric":   extract_field("Evaluation Metric"),
+        "task":     extract_field("Task Type"),
+        "target":   extract_field("Target Column"),
         "deadline": extract_field("Deadline"),
-        "url": extract_field("URL"),
+        "url":      extract_field("URL"),
     }
