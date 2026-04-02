@@ -21,3 +21,10 @@ give model this:
 ---
 
 make a proper plan andcreate a unlimated Kaggleclaw that can solve any kaggle given competitionn as own!
+
+-----------------------
+
+Now i introduct models/host.py that host model in notebook optimazed way like  preloaded wights and then serve using vllm is i gues most fast and optimazed way 
+help me to build correct host model adding corner button "Host model or  Model Hosted" this help to see hosted model 
+
+correctly align data and api call though model using harmony and vllm , chat, browser , tool  check  every think and add correctly  

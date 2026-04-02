@@ -386,3 +386,27 @@ function autoScroll() {
   const feed = document.getElementById('feed');
   feed.scrollTop = feed.scrollHeight;
 }
+
+// ── Model Hosting ──────────────────────────────────────────────
+async function triggerHostModel() {
+  const btn = document.getElementById('btn-host-model');
+  btn.disabled = true;
+  btn.textContent = '⏳ Hosting...';
+
+  try {
+    const res = await fetch('/host_model', { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'hosting_started' || data.status === 'already_hosting') {
+      btn.textContent = '✅ Model Hosted';
+      btn.classList.add('btn-ghost');
+    } else {
+      btn.textContent = '❌ Failed';
+      btn.disabled = false;
+      console.error(data.error || 'Unknown error');
+    }
+  } catch (e) {
+    btn.textContent = '❌ Failed';
+    btn.disabled = false;
+    console.error(e);
+  }
+}

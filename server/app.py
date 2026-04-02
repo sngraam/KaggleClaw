@@ -9,6 +9,7 @@ Endpoints:
   POST /reset       — reset conversation
   GET  /health      — status + public URL
   GET  /competition — competition info for sidebar
+  POST /host_model  — triggers local vLLM hosting
 """
 
 import asyncio
@@ -175,3 +176,26 @@ async def reset():
     state.reset()
     _init_runner()
     return {"status": "reset"}
+
+
+@app.post("/host_model")
+async def host_model():
+    """Start local vLLM server via models/host.py in a background thread to avoid blocking."""
+    if state.vllm_server:
+        return {"status": "already_hosting"}
+    
+    import asyncio
+    from fastapi.concurrency import run_in_threadpool
+    from models.host import Server, ServerConfig
+
+    def _start_server():
+        try:
+            cfg = ServerConfig()
+            state.vllm_server = Server(cfg=cfg, port=8080)
+        except Exception as e:
+            print(f"Error starting server: {e}")
+
+    # Fire and forget or background task it
+    asyncio.create_task(run_in_threadpool(_start_server))
+    
+    return {"status": "hosting_started"}
