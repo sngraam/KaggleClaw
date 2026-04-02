@@ -13,15 +13,15 @@ except ImportError:
 
 @dataclass
 class ServerConfig:
-    model_path: str = "/kaggle/input/oss-120b"
+    model_path: str = "/kaggle/input/models/danielhanchen/gpt-oss-20b/transformers/default/1"
     served_model_name: str = "oss-120b"
-    workers: int = 4
+    workers: int = 16
     seed: int = 42
     batch_size: int = 256
-    gpu_memory_utilization: float = 0.90
+    gpu_memory_utilization: float = 0.92
     dtype: str = "auto"
     kv_cache_dtype: str = "auto"
-    context_tokens: int = 4096
+    context_tokens: int = 65556
     stream_interval: int = 1
     server_timeout: int = 600
     session_timeout: int = 120
