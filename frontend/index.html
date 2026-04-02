@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KaggleClaw — Autonomous Kaggle Solver</title>
+  <meta name="description" content="KaggleClaw: An autonomous AI agent that solves Kaggle competitions using OSS-120B, powered by internet access, Python execution, and file tools." />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- Markdown & Highlight -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <!-- ── Header ────────────────────────────────────────────── -->
+  <header id="header">
+    <div class="header-left">
+      <div class="logo">
+        <span class="logo-icon">⚡</span>
+        <span class="logo-text">Kaggle<span class="logo-accent">Claw</span></span>
+      </div>
+      <div id="comp-badge" class="comp-badge hidden">
+        <span class="comp-task" id="comp-task">—</span>
+        <span class="sep">·</span>
+        <span class="comp-metric" id="comp-metric">—</span>
+      </div>
+    </div>
+
+    <div class="header-center">
+      <div id="status-pill" class="status-pill idle">
+        <span class="status-dot"></span>
+        <span id="status-text">Idle</span>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <a id="url-pill" class="url-pill hidden" href="#" target="_blank">
+        🌐 <span id="url-text">—</span>
+      </a>
+    </div>
+  </header>
+
+  <!-- ── Layout ─────────────────────────────────────────────── -->
+  <div id="layout">
+
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-title">Competition</div>
+        <div class="info-card">
+          <div class="info-row"><span class="info-label">Name</span><span id="s-name" class="info-val">—</span></div>
+          <div class="info-row"><span class="info-label">Task</span><span id="s-task" class="info-val">—</span></div>
+          <div class="info-row"><span class="info-label">Metric</span><span id="s-metric" class="info-val">—</span></div>
+          <div class="info-row"><span class="info-label">Target</span><span id="s-target" class="info-val">—</span></div>
+          <div class="info-row"><span class="info-label">Deadline</span><span id="s-deadline" class="info-val">—</span></div>
+          <div class="info-row"><a id="s-url" class="info-link" href="#" target="_blank">View on Kaggle ↗</a></div>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Controls</div>
+        <button id="btn-start" class="btn btn-primary" onclick="startAgent()">
+          ▶ Start Agent
+        </button>
+        <button id="btn-reset" class="btn btn-ghost" onclick="resetAgent()">
+          ↺ Reset
+        </button>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">Session</div>
+        <div class="stat-row"><span class="stat-label">Turns</span><span id="stat-turns" class="stat-val">0</span></div>
+        <div class="stat-row"><span class="stat-label">Tool Calls</span><span id="stat-tools" class="stat-val">0</span></div>
+        <div class="stat-row"><span class="stat-label">Events</span><span id="stat-events" class="stat-val">0</span></div>
+      </div>
+    </aside>
+
+    <!-- Main feed -->
+    <main id="feed-wrapper">
+      <div id="feed">
+        <div class="feed-empty" id="feed-empty">
+          <div class="empty-icon">⚡</div>
+          <div class="empty-title">KaggleClaw Ready</div>
+          <div class="empty-body">Fill in <code>competition.md</code> with your competition details, then click <strong>Start Agent</strong> to begin.</div>
+        </div>
+      </div>
+
+      <!-- Input bar -->
+      <div id="input-bar">
+        <div id="typing-indicator" class="typing-indicator hidden">
+          <span></span><span></span><span></span>
+          <span class="typing-label">Agent thinking...</span>
+        </div>
+        <div class="input-row">
+          <input
+            id="chat-input"
+            type="text"
+            placeholder="Send a message to the agent..."
+            autocomplete="off"
+            onkeydown="if(event.key==='Enter') sendMessage()"
+          />
+          <button class="btn btn-send" onclick="sendMessage()" id="btn-send">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </div>
+      </div>
+    </main>
+
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
