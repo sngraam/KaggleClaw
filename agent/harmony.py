@@ -30,7 +30,6 @@ try:
         TextContent,
         DeveloperContent,
         SystemContent,
-        Tool
     )
     _HARMONY_AVAILABLE = True
 except ImportError:
@@ -98,7 +97,7 @@ def system_message(text: str) -> Message:
         return Message(Author(Role.SYSTEM), [TextContent(text)], recipient="assistant")
     return Message(
         author=Author(role=Role.SYSTEM),
-        content=[SystemContent(model_identity=text, tools=[Tool(name="browser"), Tool(name="python")])],
+        content=[SystemContent(model_identity=text)],
     ).with_recipient("assistant")
 
 
