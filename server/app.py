@@ -204,12 +204,18 @@ async def host_model():
 @app.post("/stop_hosting")
 async def stop_hosting():
     """Stop the local vLLM server if it is running."""
+    import subprocess
     if state.vllm_server:
         try:
             # Assumes models/host.py has server_process to kill
             if hasattr(state.vllm_server, "server_process") and state.vllm_server.server_process:
-                state.vllm_server.server_process.terminate()
-                state.vllm_server.server_process.wait(timeout=10)
+                proc = state.vllm_server.server_process
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
         except Exception as e:
             print(f"Error stopping vLLM: {e}")
         finally:

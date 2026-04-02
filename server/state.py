@@ -35,12 +35,16 @@ class AppState:
 
     def reset(self):
         self.conversation = []
-        self.event_queue = asyncio.Queue()
         if self.runner:
             self.runner.reset()
+            self.runner = None
+            
         if self.agent_task and not self.agent_task.done():
             self.agent_task.cancel()
         self.agent_task = None
+        
+        # Completely reinit queue to drop old events
+        self.event_queue = asyncio.Queue()
 
 
 # Global singleton

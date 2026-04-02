@@ -41,3 +41,27 @@ future: <Task finished name='Task-18' coro=<AgentRunner.send_user_message() done
 3. when model hosting the corner button we added this add host model , hosting.. , model hosted (this dynamic after model hosted then show model hosted and stop hosting button)
 --
 check hormony doc and  correctly implemnt harmony and prompt addintion use internet to find  all this
+
+----------
+
+Problem face while using:
+
+1. convesion show error in frontend 
+`User: hiHello! 👋 How can I help you today?User: who are youI’m ChatGPT, an AI language text, answer here to help you as best as I can! How can I assistSure thing! I’d love to get started— forward to the details!`
+
+this happed when i type to conversion this not show correct converstion formate also not scollable 
+- add scolable model & user conversation prompts
+- when model ganration 
+    - thinking
+    - tool
+    - main output
+
+this also show is mendatory
+
+2. when click rest whole even are reset all data collected that event even stop all proces immgetly reload model internally this rest mens whole reset not past / preview such thinks 
+
+3. Error stopping vLLM: Command '['/usr/bin/python3', '-m', 'vllm.entrypoints.openai.api_server', '--seed', '42', '--model', '/kaggle/input/models/danielhanchen/gpt-oss-20b/transformers/default/1', '--served-model-name', 'oss-120b', '--tensor-parallel-size', '1', '--max-num-seqs', '256', '--gpu-memory-utilization', '0.92', '--host', '0.0.0.0', '--port', '8080', '--dtype', 'auto', '--kv-cache-dtype', 'auto', '--max-model-len', '65556', '--stream-interval', '1', '--async-scheduling', '--disable-log-stats', '--enable-prefix-caching']' timed out after 10 seconds
+
+correctly understad problem 
+
+correct the fronntend and backend issue show clearly what goning on every model ganrated text showing is mandatory 

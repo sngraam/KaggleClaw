@@ -56,7 +56,7 @@ function handleEvent(data) {
       renderText(data.content);
       break;
     case 'tool_call':
-      activeTextCard = null;
+      finalizeTextCard();
       activeThinkCard = null;
       renderToolCall(data.tool_name, data.content);
       stats.tools++;
@@ -66,7 +66,7 @@ function handleEvent(data) {
       renderToolResult(data.tool_name, data.content);
       break;
     case 'error':
-      activeTextCard = null;
+      finalizeTextCard();
       activeThinkCard = null;
       renderError(data.content, data.tool_name);
       break;
@@ -78,7 +78,7 @@ function handleEvent(data) {
       isAgentRunning = false;
       setTypingVisible(false);
       setBtnLoading(false);
-      activeTextCard = null;
+      finalizeTextCard();
       activeThinkCard = null;
       break;
   }
@@ -99,6 +99,7 @@ function renderThinking(text) {
 
 function renderText(text) {
   hideFeedEmpty();
+  activeThinkCard = null; // A new block of text means thinking is done
   if (!activeTextCard) {
     activeTextCard = createCard('text', '💬', 'Agent', '', true);
     const body = activeTextCard.querySelector('.card-body');
@@ -160,6 +161,8 @@ function renderError(msg, toolName) {
 }
 
 function renderUserMsg(text) {
+  finalizeTextCard();
+  activeThinkCard = null;
   hideFeedEmpty();
   const card = createCard('user', '🙋', 'You', '', true);
   const body = card.querySelector('.card-body');
@@ -261,6 +264,8 @@ async function sendMessage() {
   if (!text) return;
 
   input.value = '';
+  finalizeTextCard();
+  activeThinkCard = null;
   renderUserMsg(text);
 
   setTypingVisible(true);
@@ -289,7 +294,7 @@ async function resetAgent() {
   stats = { turns: 0, tools: 0, events: 0 };
   updateStats();
   isAgentRunning = false;
-  activeTextCard = null;
+  finalizeTextCard();
   activeThinkCard = null;
   setStatus('idle', 'Idle');
   setTypingVisible(false);
