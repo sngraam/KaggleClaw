@@ -214,9 +214,19 @@ class AgentRunner:
                     break
 
                 if tool_message is None:
-                    # Model returned final answer — done
-                    await self._emit(AgentEvent(type="done", content="", metadata={"turn": turn + 1}))
-                    break
+                    # Model returned text without a tool. Instruct it to keep going.
+                    try:
+                        from openai_harmony import Message, Author, Role, TextContent
+                        from uuid import uuid4
+                        continuation = Message(
+                            id=uuid4(),
+                            author=Author(role=Role.USER),
+                            content=[TextContent(text="Please continue analyzing and call necessary tools to solve the competition. Provide your final solution when done.")]
+                        ).with_recipient("assistant")
+                        self.messages.append(continuation)
+                        continue
+                    except Exception:
+                        pass
 
                 # Dispatch tool
                 try:
@@ -259,7 +269,7 @@ class AgentRunner:
             await self._emit_error("Failed to render conversation for completion", exc)
             return None
 
-        max_tokens = max(256, self.context_tokens - len(prompt_ids))
+        max_tokens = 14096
         client     = self._get_client()
 
         # Dynamically fetch the real hosted model name (fixes 404 when vLLM uses Kaggle paths)
