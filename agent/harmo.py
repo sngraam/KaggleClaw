@@ -75,9 +75,11 @@ class HarmoTemplate:
 from datetime import date
 from pathlib import Path
 
-WORKING_DIR = "/kaggle/working/KaggleClaw"
-RUN_DIR     = "/kaggle/working/KaggleClaw/run"
-INPUT_DIR   = "/kaggle/input/notebooks/sangrampatil5150/notebook38b92fed30/"
+from config.settings import settings
+
+WORKING_DIR = settings.PROJECT_DIR
+RUN_DIR     = settings.RUN_DIR
+INPUT_DIR   = settings.INPUT_DIR
 
 
 def _read_safe(path: str) -> str:

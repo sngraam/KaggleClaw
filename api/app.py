@@ -51,19 +51,15 @@ async def startup_event():
 
 def _init_runner():
     """Create agent runner with all tools."""
-    from agent.run import AgentRunner
+    from agent.core.runner import AgentRunner
     from agent.tools import get_all_tools
+    from config.settings import settings
 
-    tools = get_all_tools()  # PythonTool, FileTool, ApplyPatchTool, WebSearchTool, PlanFollowTool
-
-    model    = os.environ.get("VLLM_MODEL", "open-scorer-120b")
-    base_url = os.environ.get("VLLM_BASE_URL", "http://0.0.0.0:8080/v1")
+    tools = get_all_tools()
 
     state.runner = AgentRunner(
         event_queue=state.event_queue,
         tools=tools,
-        model=model,
-        base_url=base_url,
     )
 
 
@@ -130,7 +126,7 @@ import json
 import asyncio
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
-from server.state import state  # <-- Import your state here
+from api.state import state  # <-- Import your state here
 
 # Your endpoint might be @app.get or @router.get
 @app.get("/stream")
