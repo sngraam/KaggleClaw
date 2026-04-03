@@ -66,16 +66,6 @@ HARMONY_TOKENS = {
 # ── AgentRunner ────────────────────────────────────────────────────────────────
 
 class AgentRunner:
-    """
-    Manages the multi-turn agentic loop for KaggleClaw.
-
-    Responsibilities:
-    - Build initial conversation from harmo.py
-    - Stream completions from the local vLLM server
-    - Parse harmony tokens via StreamableParser
-    - Dispatch tool calls to the correct Tool subclass
-    - Emit AgentEvent objects to event_queue for SSE streaming
-    """
 
     def __init__(
         self,
@@ -86,7 +76,7 @@ class AgentRunner:
         api_key: str = "sk-local",
         max_turns: int = 50,
         context_tokens: int = 32_000,
-        temperature: float = 0.6,
+        temperature: float = 1.0,
     ):
         self.event_queue   = event_queue
         self.tools         = {t.name: t for t in tools}
@@ -97,11 +87,10 @@ class AgentRunner:
         self.context_tokens = context_tokens
         self.temperature   = temperature
 
-        self.messages: list[Message] = []
+        self.messages: list[Message] =[]
         self._running     = False
         self._cancel_flag = False
 
-        # openai client (lazy)
         self._client = None
 
         if _HARMONY_OK:
@@ -157,10 +146,10 @@ class AgentRunner:
 
         if initial_message:
             try:
+                from openai_harmony import Message, Role
                 user_msg = Message.from_role_and_content(Role.USER, initial_message)
                 self.messages.append(user_msg)
             except Exception:
-                # Fallback: just store as plain text
                 self.messages.append({"role": "user", "content": initial_message})
 
         await self._agent_loop()
@@ -172,6 +161,7 @@ class AgentRunner:
             return
 
         try:
+            from openai_harmony import Message, Role
             user_msg = Message.from_role_and_content(Role.USER, text)
             self.messages.append(user_msg)
         except Exception:
@@ -186,7 +176,7 @@ class AgentRunner:
 
     def reset(self):
         """Clear conversation history."""
-        self.messages = []
+        self.messages =[]
         self._running = False
         self._cancel_flag = False
 
@@ -196,6 +186,7 @@ class AgentRunner:
         self._running     = True
         self._cancel_flag = False
         turn = 0
+        consecutive_no_tool = 0
 
         try:
             await self._emit_status(f"Starting agent — {len(self.messages)} initial messages")
@@ -213,28 +204,45 @@ class AgentRunner:
                     await self._emit_error(f"Model call failed on turn {turn + 1}", exc)
                     break
 
+                # ── Fix: Stop model loop when done ──
                 if tool_message is None:
-                    # Model returned text without a tool. Instruct it to keep going.
+                    final_text = ""
+                    if self.messages:
+                        final_text = _extract_text(self.messages[-1])
+                    
+                    if "SUBMISSION READY" in final_text:
+                        await self._emit_status("Mission Accomplished: SUBMISSION READY string found.", done=True)
+                        await self._emit(AgentEvent(type="done", content="Task Completed Successfully!"))
+                        break
+
+                    consecutive_no_tool += 1
+                    if consecutive_no_tool >= 3:
+                        await self._emit_status("Agent stopped making progress. Stopping to prevent infinite loops.", done=True)
+                        await self._emit(AgentEvent(type="done", content="Agent halted due to lack of progress."))
+                        break
+
+                    # Instruct it to keep going, but clarify final objective.
                     try:
                         from openai_harmony import Message, Author, Role, TextContent
                         from uuid import uuid4
                         continuation = Message(
                             id=uuid4(),
                             author=Author(role=Role.USER),
-                            content=[TextContent(text="Please continue analyzing and call necessary tools to solve the competition. Provide your final solution when done.")]
+                            content=[TextContent(text="You stopped without outputting 'SUBMISSION READY' or calling a tool. Please continue analyzing, call necessary tools, and when you are fully complete, output 'SUBMISSION READY'.")]
                         ).with_recipient("assistant")
                         self.messages.append(continuation)
                         continue
                     except Exception:
                         pass
+                else:
+                    consecutive_no_tool = 0
 
-                # Dispatch tool
+                # ── Dispatch Tool ──
                 try:
                     tool_responses = await self._dispatch_tool(tool_message)
                 except Exception as exc:
                     await self._emit_error(f"Tool dispatch failed: {tool_message}", exc)
-                    # Add error as tool response so model can recover
-                    tool_responses = []
+                    tool_responses =[]
 
                 for resp in tool_responses:
                     self.messages.append(resp)
@@ -251,48 +259,34 @@ class AgentRunner:
     # ── vLLM streaming ───────────────────────────────────────────────────────
 
     async def _call_model_and_stream(self) -> Message | None:
-        """
-        Stream a completion from vLLM, parse harmony tokens, emit SSE events.
-        Returns the tool-call Message if a tool was requested, or None for final answer.
-        """
+
         if not _HARMONY_OK:
             await self._emit_error("openai_harmony not available — cannot stream.")
             return None
 
-        encoding     = self.encoding
+        encoding = self.encoding
         conversation = Conversation.from_messages(self.messages)
 
-        # Build prompt token ids
         try:
             prompt_ids = encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
         except Exception as exc:
             await self._emit_error("Failed to render conversation for completion", exc)
             return None
 
-        max_tokens = 14096
-        client     = self._get_client()
+        # ── Fix: Dynamic Maximum tokens bounding ──
+        max_tokens = self.context_tokens - len(prompt_ids)
+        if max_tokens < 500:
+            await self._emit_error(f"Context length limits reached. Prompt tokens: {len(prompt_ids)}. Context window: {self.context_tokens}")
+            return None
 
-        # Dynamically fetch the real hosted model name (fixes 404 when vLLM uses Kaggle paths)
-        try:
-            model_info = await client.models.list()
-            if model_info.data:
-                self.model = model_info.data[0].id
-        except Exception:
-            pass
-
-        # Token buffer for StreamableParser
-        token_buffer: list[int] = []
-        parser = StreamableParser(encoding, Role.ASSISTANT)
-
-        # Accumulators for SSE streaming
-        think_buf = ""
-        text_buf  = ""
+        client = self._get_client()
+        token_buffer: list[int] =[]
 
         try:
             stream = await client.completions.create(
                 model=self.model,
                 prompt=prompt_ids,
-                max_tokens=max_tokens,
+                max_tokens=min(max_tokens, 16384), # vLLM outputs usually capped
                 temperature=self.temperature,
                 stream=True,
                 logprobs=5,
@@ -310,7 +304,7 @@ class AgentRunner:
         tool_message: Message | None = None
         current_channel = None
         emitted_len = 0
-        new_messages = []
+        new_messages =[]
 
         try:
             async for chunk in stream:
@@ -323,12 +317,26 @@ class AgentRunner:
 
                 text_delta = choice.text or ""
 
-                token_ids: list[int] = []
+                # ── Fix: Robust extraction of token_ids ensuring the token_buffer fills ──
+                token_ids: list[int] =[]
                 if hasattr(choice, "token_ids"):
-                    token_ids = choice.token_ids or []
+                    token_ids = choice.token_ids or[]
                 elif hasattr(chunk, "token_ids"):
-                    token_ids = chunk.token_ids or []
-                else:
+                    token_ids = chunk.token_ids or[]
+                elif getattr(choice, "model_extra", None):
+                    token_ids = choice.model_extra.get("token_ids",[])
+                elif getattr(chunk, "model_extra", None):
+                    token_ids = chunk.model_extra.get("token_ids",[])
+
+                if not token_ids:
+                    # Fallback to text encoding to keep parser alive if vLLM fails to send IDs
+                    if text_delta and self.encoding:
+                        try:
+                            token_ids = self.encoding.encode(text_delta)
+                        except Exception:
+                            pass
+
+                if not token_ids:
                     if text_delta:
                         await self._emit(AgentEvent(type="text", content=text_delta))
                     continue
@@ -366,14 +374,10 @@ class AgentRunner:
                         break
 
                 if channel == "thinking" or channel == "analysis":
-                    await self._emit(AgentEvent(
-                        type="thinking", content=content, metadata=meta
-                    ))
+                    await self._emit(AgentEvent(type="thinking", content=content, metadata=meta))
 
                 elif channel == "final":
-                    await self._emit(AgentEvent(
-                        type="text", content=content, metadata=meta
-                    ))
+                    await self._emit(AgentEvent(type="text", content=content, metadata=meta))
 
                 elif recipient == "python":
                     await self._emit(AgentEvent(
@@ -384,8 +388,7 @@ class AgentRunner:
                     ))
                     tool_message = msg
 
-                elif recipient in ("file", "apply_patch", "web_search", "plan_follow"):
-                    # Function tools called via commentary channel
+                elif recipient in ("file", "apply_patch", "web_search", "plan_follow", "browser"):
                     await self._emit(AgentEvent(
                         type="tool_call",
                         tool_name=recipient,
@@ -395,7 +398,6 @@ class AgentRunner:
                     tool_message = msg
 
                 elif channel == "functions" or (recipient and recipient.startswith("functions.")):
-                    # functions.apply_patch, functions.file etc.
                     tool_name = (recipient or "").replace("functions.", "")
                     await self._emit(AgentEvent(
                         type="tool_call",
@@ -405,9 +407,11 @@ class AgentRunner:
                     ))
                     tool_message = msg
 
-                # Check stop condition
+                # Handle limit hit
                 finish_reason = getattr(choice, "finish_reason", None)
                 if finish_reason in ("stop", "length"):
+                    if finish_reason == "length":
+                        await self._emit_status("Model stopped due to reaching token limit.", metadata={"reason": "length"})
                     break
 
         except Exception as exc:
@@ -417,7 +421,6 @@ class AgentRunner:
         if new_messages:
             self.messages.extend(new_messages)
 
-        # If no tool was requested, this was a final answer
         if tool_message is None:
             return None
 
@@ -426,11 +429,9 @@ class AgentRunner:
     # ── Tool dispatch ─────────────────────────────────────────────────────────
 
     async def _dispatch_tool(self, message: Message) -> list[Message]:
-        """Route the tool-call message to the correct tool and collect responses."""
         recipient = getattr(message, "recipient", None) or ""
         channel   = getattr(message, "channel", None) or ""
 
-        # Resolve tool name
         tool_name = recipient
         if not tool_name and channel.startswith("functions."):
             tool_name = channel.removeprefix("functions.")
@@ -440,20 +441,12 @@ class AgentRunner:
         tool = self.tools.get(tool_name)
 
         if tool is None:
-            error_text = (
-                f"[ERROR] Unknown tool '{tool_name}'. "
-                f"Available: {', '.join(self.tools.keys())}"
-            )
-            await self._emit(AgentEvent(
-                type="tool_result",
-                tool_name=tool_name or "unknown",
-                content=error_text,
-            ))
+            error_text = f"[ERROR] Unknown tool '{tool_name}'. Available: {', '.join(self.tools.keys())}"
+            await self._emit(AgentEvent(type="tool_result", tool_name=tool_name or "unknown", content=error_text))
             try:
-                # Return an error message back to assistant
                 from openai_harmony import Author, TextContent
                 from uuid import uuid4
-                return [Message(
+                return[Message(
                     id=uuid4(),
                     author=Author(role=Role.TOOL, name=tool_name or "unknown"),
                     content=[TextContent(text=error_text)],
@@ -463,7 +456,7 @@ class AgentRunner:
                 return []
 
         responses: list[Message] = []
-        result_parts: list[str] = []
+        result_parts: list[str] =[]
 
         try:
             async for resp_msg in tool.process(message):
@@ -471,57 +464,34 @@ class AgentRunner:
                 if getattr(resp_msg, 'content', None):
                     for i, c in enumerate(resp_msg.content):
                         if hasattr(c, 'text') and len(c.text) > 15000:
-                            c.text = c.text[:15000] + f"\n... [TRUNCATED from {len(c.text)} bytes to prevent context overflow] ..."
+                            c.text = c.text[:15000] + f"\n...[TRUNCATED from {len(c.text)} bytes to prevent context overflow] ..."
 
                 responses.append(resp_msg)
                 result_parts.append(_extract_text(resp_msg))
 
             combined_result = "\n".join(result_parts)
-            await self._emit(AgentEvent(
-                type="tool_result",
-                tool_name=tool_name,
-                content=combined_result,
-            ))
+            await self._emit(AgentEvent(type="tool_result", tool_name=tool_name, content=combined_result))
 
         except Exception as exc:
             error_text = f"[TOOL ERROR] {tool_name}: {exc}\n{traceback.format_exc()}"
             logger.error(error_text)
-            await self._emit(AgentEvent(
-                type="tool_result",
-                tool_name=tool_name,
-                content=error_text,
-            ))
+            await self._emit(AgentEvent(type="tool_result", tool_name=tool_name, content=error_text))
             try:
                 from openai_harmony import Author, TextContent
                 from uuid import uuid4
-                responses = [Message(
+                responses =[Message(
                     id=uuid4(),
                     author=Author(role=Role.TOOL, name=tool_name),
                     content=[TextContent(text=error_text)],
                     channel=channel,
                 ).with_recipient("assistant")]
             except Exception:
-                responses = []
+                responses =[]
 
         return responses
 
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
 def _extract_text(msg) -> str:
-    """Safely extract text content from a harmony Message."""
     try:
         content = msg.content
         if isinstance(content, list):
-            parts = []
-            for item in content:
-                if hasattr(item, "text"):
-                    parts.append(item.text or "")
-                else:
-                    parts.append(str(item))
-            return "".join(parts)
-        if hasattr(content, "text"):
-            return content.text or ""
-        return str(content)
-    except Exception:
-        return ""
+            parts =
