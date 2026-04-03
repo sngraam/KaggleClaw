@@ -65,6 +65,24 @@ HARMONY_TOKENS = {
 
 # ── AgentRunner ────────────────────────────────────────────────────────────────
 
+def _extract_text(msg) -> str:
+    """Safely extract text content from a harmony Message."""
+    try:
+        content = msg.content
+        if isinstance(content, list):
+            parts =[]
+            for item in content:
+                if hasattr(item, "text"):
+                    parts.append(item.text or "")
+                else:
+                    parts.append(str(item))
+            return "".join(parts)
+        if hasattr(content, "text"):
+            return content.text or ""
+        return str(content)
+    except Exception:
+        return ""
+    
 class AgentRunner:
 
     def __init__(
@@ -286,7 +304,7 @@ class AgentRunner:
             stream = await client.completions.create(
                 model=self.model,
                 prompt=prompt_ids,
-                max_tokens=min(max_tokens, 16384), # vLLM outputs usually capped
+                max_tokens=min(max_tokens, 32256), # vLLM outputs usually capped
                 temperature=self.temperature,
                 stream=True,
                 logprobs=5,
@@ -489,9 +507,3 @@ class AgentRunner:
                 responses =[]
 
         return responses
-
-def _extract_text(msg) -> str:
-    try:
-        content = msg.content
-        if isinstance(content, list):
-            parts =
