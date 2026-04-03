@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from openai_harmony import Author, Message, Role, TextContent
 
-from ..tool import Tool
+from agent.tool import Tool
 
 ALLOWED_WRITE_ROOTS = ["/kaggle/working", "/tmp"]
 ALLOWED_READ_ROOTS = ["/kaggle/working", "/kaggle/input", "/tmp"]

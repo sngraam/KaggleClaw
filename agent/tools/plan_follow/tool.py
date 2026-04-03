@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from openai_harmony import Author, Message, Role, TextContent
 
-from ..tool import Tool
+from agent.tool import Tool
 
 # ── Path resolution ────────────────────────────────────────────────────────────
 

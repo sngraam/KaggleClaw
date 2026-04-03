@@ -537,7 +537,7 @@ if __name__ == "__main__":
 
 try:
     from openai_harmony import Author, Message, Role, TextContent
-    from ..tool import Tool as _BaseTool
+    from agent.tool import Tool as _BaseTool
 
     # Sandboxed root for apply_patch writes
     _PATCH_ROOT = "/kaggle/working" if os.path.exists("/kaggle") else "."

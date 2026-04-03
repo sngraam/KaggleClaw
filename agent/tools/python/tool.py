@@ -6,7 +6,7 @@ import threading
 import time
 import queue
 
-from open_harmony import Message, Role, TextContent, ToolNamespaceConfig, Author
+from openai_harmony import Message, Role, TextContent, ToolNamespaceConfig, Author
 from jupyter_client import KernelManager
 
 class Sandbox:
