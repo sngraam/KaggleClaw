@@ -164,38 +164,22 @@ async def stream_agent():
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-from agent.run import AgentRunner
-from agent.tools import get_all_tools
-
-
 @app.post("/start")
-async def start_and_stream():
-    # 1. Create the queue
-    my_queue = asyncio.Queue()
-    
-    # 2. Create the runner
-    my_agent = AgentRunner(event_queue=my_queue, tools=get_all_tools())
-    
-    # 3. Start it in the background
-    asyncio.create_task(my_agent.run())
-    
-    # 4. Stream from my_queue
-    async def event_generator():
-        try:
-            while True:
-                event = await my_queue.get()  # <--- Use my_queue!
-                
-                if hasattr(event, "to_sse"):
-                    yield event.to_sse()
-                else:
-                    yield f"data: {json.dumps(event)}\n\n"
-                    
-                if getattr(event, "type", None) == "done" or (isinstance(event, dict) and getattr(event, "get", lambda x: None)("type") == "done"):
-                    break
-        except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+async def start_agent(request: Request):
+    """Start the agent on the current competition."""
+    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    message = body.get("message", "Begin solving the competition described in competition.md. Take full ownership.")
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    if not state.runner:
+        _init_runner()
+
+    if state.agent_task and not state.agent_task.done():
+        return JSONResponse({"error": "Agent already running"}, status_code=409)
+
+    state.agent_task = asyncio.create_task(
+        state.runner.run(initial_message=message)
+    )
+    return {"status": "started", "message": message}
 
 
 @app.post("/chat")
