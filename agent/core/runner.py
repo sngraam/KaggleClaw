@@ -155,7 +155,7 @@ class AgentRunner:
             self._running = False
 
     async def _dispatch_tool(self, message: Any) -> list[Any]:
-        from openai_harmony import Role, Author, TextContent
+        from openai_harmony import Role, Author, TextContent, Message
         from uuid import uuid4
         
         recipient = getattr(message, "recipient", None) or ""
@@ -189,9 +189,11 @@ class AgentRunner:
             await self._emit_error(err)
             responses = [Message(id=uuid4(), author=Author(role=Role.TOOL, name=tool_name), content=[TextContent(text=err)], channel=channel).with_recipient("assistant")]
 
-        return responses
+        
         finally:
             self._running = False
+
+        return responses
 
     def _extract_text(self, msg) -> str:
         """Safely extract text content from a harmony Message."""
