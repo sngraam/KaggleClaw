@@ -298,6 +298,14 @@ class AgentRunner:
             return None
 
         client = self._get_client()
+        try:
+            model_info = await client.models.list()
+            if model_info.data:
+                self.model = model_info.data[0].id
+                logger.info(f"Auto-detected vLLM model: {self.model}")
+        except Exception:
+            pass
+
         token_buffer: list[int] =[]
 
         try:
