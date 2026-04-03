@@ -91,6 +91,9 @@ def _load_competition_context() -> str:
     for p in [f"{WORKING_DIR}/competition.md", "competition.md"]:
         content = _read_safe(p)
         if content != "[file not found]":
+            # Prevent context length overflows if user pastes massive text
+            if len(content) > 30000:
+                return content[:30000] + "\n\n... [TRUNCATED] ... \nWARNING: competition.md was too long. Consider using file or web tools to read specifics."
             return content
     return "[competition.md not found — please create it]"
 

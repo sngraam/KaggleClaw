@@ -143,6 +143,15 @@ After completing a step, call `mark_done <step text>` to update progress.
                 raw = str(c).strip()
 
         try:
+            import json
+            if raw.startswith("{"):
+                parsed = json.loads(raw)
+                if "command" in parsed:
+                    raw = parsed["command"].strip()
+        except Exception:
+            pass
+
+        try:
             result = _dispatch(raw)
         except Exception as exc:
             result = f"[ERROR] plan_follow failed: {type(exc).__name__}: {exc}"

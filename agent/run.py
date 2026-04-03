@@ -184,6 +184,12 @@ class AgentRunner:
         """Request cancellation of the current loop."""
         self._cancel_flag = True
 
+    def reset(self):
+        """Clear conversation history."""
+        self.messages = []
+        self._running = False
+        self._cancel_flag = False
+
     # ── Agentic loop ─────────────────────────────────────────────────────────
 
     async def _agent_loop(self):
@@ -292,107 +298,103 @@ class AgentRunner:
             return None
 
         tool_message: Message | None = None
+        current_channel = None
+        emitted_len = 0
 
         try:
             async for chunk in stream:
                 if self._cancel_flag:
                     break
 
-                # Extract token ids from chunk
                 choice = chunk.choices[0] if chunk.choices else None
                 if choice is None:
                     continue
 
                 text_delta = choice.text or ""
 
-                # Try to get token ids from extra data
                 token_ids: list[int] = []
                 if hasattr(choice, "token_ids"):
                     token_ids = choice.token_ids or []
                 elif hasattr(chunk, "token_ids"):
                     token_ids = chunk.token_ids or []
                 else:
-                    # Fallback: no token ids — stream as raw text
                     if text_delta:
-                        text_buf += text_delta
                         await self._emit(AgentEvent(type="text", content=text_delta))
                     continue
 
                 token_buffer.extend(token_ids)
 
-                # Feed to StreamableParser to get parsed messages
                 try:
                     new_messages = encoding.parse_messages_from_completion_tokens(
                         token_buffer, Role.ASSISTANT
                     )
                 except Exception:
-                    # Not enough tokens yet to parse — keep buffering
                     continue
 
                 if not new_messages:
                     continue
 
-                # Extend conversation
-                self.messages.extend(new_messages)
-                last_message = new_messages[-1]
+                self.messages.extend([m for m in new_messages if m not in self.messages])
 
-                # ── Emit events based on channel/recipient ──────────────────
+                msg = new_messages[-1]
+                channel   = getattr(msg, "channel", None)
+                recipient = getattr(msg, "recipient", None)
+                full_text = _extract_text(msg)
 
-                for msg in new_messages:
-                    channel   = getattr(msg, "channel", None)
-                    recipient = getattr(msg, "recipient", None)
-                    content   = _extract_text(msg)
+                if channel != current_channel:
+                    current_channel = channel
+                    emitted_len = 0
 
-                    # Special token metadata for debug panel
-                    meta = {}
-                    for tid, tname in HARMONY_TOKENS.items():
-                        if str(tid) in str(token_ids):
-                            meta["token"] = tname
-                            break
+                content = full_text[emitted_len:]
+                if not content:
+                    continue
+                emitted_len = len(full_text)
 
-                    if channel == "thinking" or channel == "analysis":
-                        if content:
-                            think_buf += content
-                            await self._emit(AgentEvent(
-                                type="thinking", content=content, metadata=meta
-                            ))
+                meta = {}
+                for tid, tname in HARMONY_TOKENS.items():
+                    if str(tid) in str(token_ids):
+                        meta["token"] = tname
+                        break
 
-                    elif channel == "final":
-                        if content:
-                            text_buf += content
-                            await self._emit(AgentEvent(
-                                type="text", content=content, metadata=meta
-                            ))
+                if channel == "thinking" or channel == "analysis":
+                    await self._emit(AgentEvent(
+                        type="thinking", content=content, metadata=meta
+                    ))
 
-                    elif recipient == "python":
-                        await self._emit(AgentEvent(
-                            type="tool_call",
-                            tool_name="python",
-                            content=content,
-                            metadata={**meta, "channel": channel},
-                        ))
-                        tool_message = msg
+                elif channel == "final":
+                    await self._emit(AgentEvent(
+                        type="text", content=content, metadata=meta
+                    ))
 
-                    elif recipient in ("file", "apply_patch", "web_search", "plan_follow"):
-                        # Function tools called via commentary channel
-                        await self._emit(AgentEvent(
-                            type="tool_call",
-                            tool_name=recipient,
-                            content=content,
-                            metadata={**meta, "channel": channel},
-                        ))
-                        tool_message = msg
+                elif recipient == "python":
+                    await self._emit(AgentEvent(
+                        type="tool_call",
+                        tool_name="python",
+                        content=content,
+                        metadata={**meta, "channel": channel},
+                    ))
+                    tool_message = msg
 
-                    elif channel == "functions" or (recipient and recipient.startswith("functions.")):
-                        # functions.apply_patch, functions.file etc.
-                        tool_name = (recipient or "").replace("functions.", "")
-                        await self._emit(AgentEvent(
-                            type="tool_call",
-                            tool_name=tool_name or "function",
-                            content=content,
-                            metadata={**meta, "channel": channel},
-                        ))
-                        tool_message = msg
+                elif recipient in ("file", "apply_patch", "web_search", "plan_follow"):
+                    # Function tools called via commentary channel
+                    await self._emit(AgentEvent(
+                        type="tool_call",
+                        tool_name=recipient,
+                        content=content,
+                        metadata={**meta, "channel": channel},
+                    ))
+                    tool_message = msg
+
+                elif channel == "functions" or (recipient and recipient.startswith("functions.")):
+                    # functions.apply_patch, functions.file etc.
+                    tool_name = (recipient or "").replace("functions.", "")
+                    await self._emit(AgentEvent(
+                        type="tool_call",
+                        tool_name=tool_name or "function",
+                        content=content,
+                        metadata={**meta, "channel": channel},
+                    ))
+                    tool_message = msg
 
                 # Check stop condition
                 finish_reason = getattr(choice, "finish_reason", None)

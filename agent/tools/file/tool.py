@@ -77,6 +77,17 @@ Examples:
         channel = message.channel
 
         try:
+            import json
+            if raw.startswith("{"):
+                parsed = json.loads(raw)
+                if "command" in parsed:
+                    raw = parsed["command"].strip()
+                elif "patch" in parsed:
+                    raw = parsed["patch"].strip()
+        except Exception:
+            pass
+
+        try:
             result = self._dispatch(raw)
         except PermissionError as e:
             result = f"[PERMISSION ERROR] {e}"
