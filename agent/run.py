@@ -256,6 +256,14 @@ class AgentRunner:
         max_tokens = max(256, self.context_tokens - len(prompt_ids))
         client     = self._get_client()
 
+        # Dynamically fetch the real hosted model name (fixes 404 when vLLM uses Kaggle paths)
+        try:
+            model_info = await client.models.list()
+            if model_info.data:
+                self.model = model_info.data[0].id
+        except Exception:
+            pass
+
         # Token buffer for StreamableParser
         token_buffer: list[int] = []
         parser = StreamableParser(encoding, Role.ASSISTANT)
