@@ -28,6 +28,7 @@ let debugVisible     = false;
 // Active streaming elements
 let activeAssistantMsg = null;
 let activeThinkBlock   = null;
+let activeToolCall     = null;
 
 // Throttled render queue
 let _renderQueue    = [];   // [{el, rawText}]
@@ -95,15 +96,15 @@ function handleEvent(data) {
       finalizeAssistant();
       finalizeThinking();
       appendToolCall(data.tool_name, data.content);
-      stats.tools++;
-      updateStats();
       break;
     case 'tool_result':
+      finalizeToolCall();
       appendToolResult(data.tool_name, data.content);
       break;
     case 'error':
       finalizeAssistant();
       finalizeThinking();
+      finalizeToolCall();
       appendError(data.content);
       break;
     case 'status':
@@ -112,6 +113,7 @@ function handleEvent(data) {
     case 'done':
       finalizeAssistant();
       finalizeThinking();
+      finalizeToolCall();
       setStatus('done', '✅ Done');
       isAgentRunning = false;
       setTypingVisible(false);
@@ -164,6 +166,15 @@ function finalizeThinking() {
     _flushRender(activeThinkBlock);
   }
   activeThinkBlock = null;
+}
+
+function finalizeToolCall() {
+  if (activeToolCall) {
+    _flushRender(activeToolCall.el);
+    delete activeToolCall.el.dataset.highlighted;
+    try { hljs.highlightElement(activeToolCall.el); } catch (e) {}
+  }
+  activeToolCall = null;
 }
 
 // ── Assistant text (streaming markdown + KaTeX) ───────────────────────────────
@@ -272,44 +283,50 @@ function _applyMarkdown(el) {
 function appendUserMsg(text) {
   finalizeAssistant();
   finalizeThinking();
+  finalizeToolCall();
   const body = createMsgRow('user', '🙋', null);
   body.textContent = text;
 }
 
 // ── Tool Call ─────────────────────────────────────────────────────────────────
 function appendToolCall(toolName, args) {
-  stats.turns++;
-  updateStats();
+  if (!activeToolCall || activeToolCall.toolName !== toolName) {
+    stats.turns++;
+    stats.tools++;
+    updateStats();
 
-  const row = document.createElement('div');
-  row.className = 'msg-row msg-tool';
+    const row = document.createElement('div');
+    row.className = 'msg-row msg-tool';
 
-  const avatar = document.createElement('div');
-  avatar.className = 'msg-avatar';
-  avatar.textContent = _toolIcon(toolName);
+    const avatar = document.createElement('div');
+    avatar.className = 'msg-avatar';
+    avatar.textContent = _toolIcon(toolName);
 
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble tool-bubble';
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble tool-bubble';
 
-  const hdr = document.createElement('div');
-  hdr.className = 'msg-header tool-header';
-  hdr.innerHTML = `Tool Call <span class="tool-name">${toolName}</span>`;
+    const hdr = document.createElement('div');
+    hdr.className = 'msg-header tool-header';
+    hdr.innerHTML = `Tool Call <span class="tool-name">${toolName}</span>`;
 
-  const pre = document.createElement('pre');
-  const code = document.createElement('code');
-  code.classList.add('language-json');
-  try { code.textContent = JSON.stringify(JSON.parse(args), null, 2); }
-  catch { code.textContent = args || '{}'; }
-  pre.appendChild(code);
-  hljs.highlightElement(code);
+    const pre = document.createElement('pre');
+    const code = document.createElement('code');
+    code.classList.add('language-json');
+    code.textContent = '';
+    pre.appendChild(code);
 
-  bubble.appendChild(hdr);
-  bubble.appendChild(pre);
-  row.appendChild(avatar);
-  row.appendChild(bubble);
-  document.getElementById('feed').appendChild(row);
-  hideFeedEmpty();
-  autoScroll();
+    bubble.appendChild(hdr);
+    bubble.appendChild(pre);
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    document.getElementById('feed').appendChild(row);
+    hideFeedEmpty();
+
+    activeToolCall = { el: code, toolName, content: '' };
+  }
+
+  activeToolCall.content += (args || '');
+  _enqueueRender(activeToolCall.el, args || '', 'think'); // think mode does pure text append safely
 }
 
 // ── Tool Result ───────────────────────────────────────────────────────────────
@@ -617,7 +634,8 @@ async function resetAgent() {
   updateStats();
   isAgentRunning   = false;
   activeAssistantMsg = null;
-  activeThinkBlock  = null;
+  activeThinkBlock   = null;
+  activeToolCall     = null;
   setStatus('idle', 'Idle');
   setTypingVisible(false);
   setStopGenVisible(false);

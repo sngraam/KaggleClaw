@@ -455,6 +455,12 @@ class AgentRunner:
 
         try:
             async for resp_msg in tool.process(message):
+                # TRUNCATE TOOL OUTPUT TO PREVENT CONTEXT OVERFLOW
+                if getattr(resp_msg, 'content', None):
+                    for i, c in enumerate(resp_msg.content):
+                        if hasattr(c, 'text') and len(c.text) > 15000:
+                            c.text = c.text[:15000] + f"\n... [TRUNCATED from {len(c.text)} bytes to prevent context overflow] ..."
+
                 responses.append(resp_msg)
                 result_parts.append(_extract_text(resp_msg))
 

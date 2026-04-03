@@ -77,7 +77,7 @@ from pathlib import Path
 
 WORKING_DIR = "/kaggle/working/KaggleClaw"
 RUN_DIR     = "/kaggle/working/KaggleClaw/run"
-INPUT_DIR   = "/kaggle/input"
+INPUT_DIR   = "/kaggle/input/notebooks/sangrampatil5150/notebook38b92fed30/"
 
 
 def _read_safe(path: str) -> str:
@@ -190,7 +190,7 @@ def build_messages() -> list:
 
     plan_follow_tool = ToolDescription.new(
         "plan_follow",
-        "Read and follow the competition plan. Commands: "
+        "Read and follow the competition plan. Commands: (if plan.md exists) "
         "'read' — show full plan.md, "
         "'status' — show progress and next step, "
         "'mark_done <step description>' — mark a completed step as done.",
@@ -231,7 +231,7 @@ WORKING ENVIRONMENT
 ═══════════════════════════════════════
 - Working directory : {WORKING_DIR}/
 - Experiments dir   : {RUN_DIR}/    (disposable experiments)
-- Dataset dir       : {INPUT_DIR}/  (read-only — competition data)
+- Dataset dir       : {INPUT_DIR}/  (read-only — competition data) (train.parquet and test.parquet)
 - Metrics evaluator : {WORKING_DIR}/metrics.py
   Call evaluate(y_true, y_pred) or score_submission(...) to self-assess.
 
