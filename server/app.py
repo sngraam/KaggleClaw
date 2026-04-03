@@ -128,37 +128,36 @@ async def list_files():
     return {"base": str(working_dir), "tree": _build_tree(working_dir)}
 
 
-@app.get("/stream")
-async def stream(request: Request):
-    """SSE endpoint — streams AgentEvents to the frontend."""
+import json
 
-    async def generator():
-        # Re-send conversation history on connect
-        for event_dict in state.conversation:
-            yield {"data": json.dumps(event_dict)}
-            await asyncio.sleep(0)
+@app.get("/stream") # (Or whatever your endpoint is named)
+async def stream_agent():
+    async def event_generator():
+        try:
+            while True:
+                event = await runner.event_queue.get()
+                
+                # Check if it's our AgentEvent dataclass
+                if hasattr(event, "to_sse"):
+                    yield event.to_sse()
+                else:
+                    # Fallback if something else accidentally put a dict in the queue
+                    yield f"data: {json.dumps(event)}\n\n"
+                
+                # Break the loop safely when the agent is done
+                if getattr(event, "type", None) == "done" or (isinstance(event, dict) and event.get("type") == "done"):
+                    break
+                    
+        except asyncio.CancelledError:
+            # Client disconnected early, just stop safely.
+            pass
+            
+        except Exception as e:
+            # ✅ FIX: Yield a properly formatted SSE string, NOT a dict!
+            error_payload = {"type": "error", "content": str(e)}
+            yield f"data: {json.dumps(error_payload)}\n\n"
 
-        # Then stream live events
-        while True:
-            if await request.is_disconnected():
-                break
-            try:
-                event = await asyncio.wait_for(state.event_queue.get(), timeout=30.0)
-                payload = {
-                    "type": event.type,
-                    "content": event.content,
-                    "tool_name": event.tool_name,
-                    "metadata": event.metadata,
-                }
-                # Persist to conversation history
-                state.conversation.append(payload)
-                yield f"data: {json.dumps(payload)}\n\n"
-            except asyncio.TimeoutError:
-                # keepalive ping
-                yield f"data: {json.dumps({'type': 'ping'})}\n\n"
-
-    from fastapi.responses import StreamingResponse
-    return StreamingResponse(generator(), media_type="text/event-stream")
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post("/start")
