@@ -258,7 +258,7 @@ class AgentRunner:
 
         # Token buffer for StreamableParser
         token_buffer: list[int] = []
-        parser = StreamableParser(encoding)
+        parser = StreamableParser(encoding, Role.ASSISTANT)
 
         # Accumulators for SSE streaming
         think_buf = ""
