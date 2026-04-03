@@ -222,6 +222,10 @@ class Tool:
         return '\n'.join(lines)
 
     @property
+    def name(self) -> str:
+        return "python"
+
+    @property
     def instruction(self) -> str:
         if self._execution_backend == "dangerously_use_local_jupyter":
             return """
