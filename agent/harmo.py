@@ -1,15 +1,77 @@
-"""
-agent/prompt.py — Builds correctly structured Harmony messages for KaggleClaw.
+import asyncio
+import json
+import os
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Literal
 
-Per official docs:
-  system    → SystemContent: identity, dates, reasoning level, built-in tools
-  developer → DeveloperContent: instructions (the real "system prompt") +
-              optional custom function tools
+# ── openai_harmony imports ─────────────────────────────────────────────────────
 
-Built-in tools (python / browser) belong in the SYSTEM message, NOT developer.
-Custom function tools belong in the DEVELOPER message.
-"""
+try:
+    from openai_harmony import (
+        load_harmony_encoding,
+        HarmonyEncodingName,
+        Conversation,
+        Message,
+        Role,
+        Author,
+        TextContent,
+        DeveloperContent,
+        SystemContent,
+        ReasoningEffort,
+        ToolNamespaceConfig,
+        ToolDescription,
+        StreamableParser,
+    )
+    _HARMONY_AVAILABLE = True
+    _harmony_import_error = None
+except ImportError as _err:
+    _HARMONY_AVAILABLE = False
+    _harmony_import_error = str(_err)
 
+
+EventType = Literal["thinking", "text", "tool_call", "tool_result", "error", "done", "status"]
+
+
+@dataclass
+class AgentEvent:
+    type: EventType
+    content: str = ""
+    tool_name: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_sse(self) -> str:
+        return f"data: {json.dumps({'type': self.type, 'content': self.content, 'tool_name': self.tool_name, 'metadata': self.metadata})}\n\n"
+
+
+class HarmoTemplate:
+
+    def __init__(self):
+
+        pass
+
+    def get_system_content(self, system_prompt: str, tool_config: ToolNamespaceConfig) -> SystemContent:
+
+        return (
+            SystemContent.new()
+            .with_model_identity(system_prompt)
+            .with_reasoning_effort(reasoning_effort=ReasoningEffort.HIGH)
+            .with_tools(tool_config)
+        )
+
+    def apply_chat_template(
+        self, 
+        system_prompt: str, 
+        user_prompt: str, 
+        tool_config: ToolNamespaceConfig
+    ) -> list[Message]:
+
+        system_content = self.get_system_content(system_prompt, tool_config)        
+        system_message = Message.from_role_and_content(Role.SYSTEM, system_content)
+
+        user_message = Message.from_role_and_content(Role.USER, user_prompt)
+
+        return [system_message, user_message]
+    
 from datetime import date
 from pathlib import Path
 
@@ -60,7 +122,6 @@ def build_messages() -> list:
         )
         .with_reasoning_effort(ReasoningEffort.HIGH)
         .with_conversation_start_date(today)
-        # Built-in tools registered in system (not developer) per docs
         .with_python_tool()
         .with_browser_tool()
     )
@@ -83,7 +144,7 @@ def build_messages() -> list:
                 "command": {
                     "type": "string",
                     "description": (
-                        "Full command string, e.g. 'read /kaggle/working/submission.csv' "
+                        "Full command string, e.g. 'read /kaggle/working/KaggleClaw/submission.csv' "
                         "or 'write /kaggle/working/model.py\\nimport pandas...'"
                     ),
                 }
@@ -94,7 +155,7 @@ def build_messages() -> list:
 
     patch_tool = ToolDescription.new(
         "apply_patch",
-        "Apply a unified diff patch to an existing file in /kaggle/working/. "
+        "Apply a unified diff patch to an existing file in /kaggle/working/KaggleClaw/. "
         "Use for surgical edits without rewriting the whole file.",
         parameters={
             "type": "object",
@@ -108,10 +169,44 @@ def build_messages() -> list:
         },
     )
 
+    web_search_tool = ToolDescription.new(
+        "web_search",
+        "Search the web for information. Send a plain text query, get back top-5 results with titles, snippets, and URLs. "
+        "No API key required. Use for researching competition domain, top notebooks, ML techniques, and error messages.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The search query, e.g. 'Kaggle fraud detection top solutions XGBoost'",
+                }
+            },
+            "required": ["command"],
+        },
+    )
+
+    plan_follow_tool = ToolDescription.new(
+        "plan_follow",
+        "Read and follow the competition plan. Commands: "
+        "'read' — show full plan.md, "
+        "'status' — show progress and next step, "
+        "'mark_done <step description>' — mark a completed step as done.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "One of: read | status | mark_done <step text>",
+                }
+            },
+            "required": ["command"],
+        },
+    )
+
     developer_content = (
         DeveloperContent.new()
         .with_instructions(instructions)
-        .with_function_tools([file_tool, patch_tool])
+        .with_function_tools([file_tool, patch_tool, web_search_tool, plan_follow_tool])
     )
 
     developer_msg = Message.from_role_and_content(Role.DEVELOPER, developer_content)

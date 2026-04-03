@@ -24,7 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 
 from .state import state
-from agent.prompt import build_competition_summary
+from agent.harmo import build_competition_summary
 
 app = FastAPI(title="KaggleClaw", version="1.0.0")
 
@@ -53,24 +53,17 @@ def _init_runner():
     """Create agent runner with all tools."""
     from agent.run import AgentRunner
     from agent.tools import get_all_tools
-    from agent.browser import ExaBackend
 
-    # Browser backend (optional — needs EXA_API_KEY or YDC_API_KEY)
-    browser_backend = None
-    if os.environ.get("EXA_API_KEY"):
-        browser_backend = ExaBackend(source="Exa Search")
+    tools = get_all_tools()  # PythonTool, FileTool, ApplyPatchTool, WebSearchTool, PlanFollowTool
 
-    # Jupyter connection file (set by Kaggle kernel environment)
-    jupyter_conn = os.environ.get("PYTHON_LOCAL_JUPYTER_CONNECTION_FILE")
-
-    tools = get_all_tools(
-        browser_backend=browser_backend,
-        jupyter_connection_file=jupyter_conn,
-    )
+    model    = os.environ.get("VLLM_MODEL", "open-scorer-120b")
+    base_url = os.environ.get("VLLM_BASE_URL", "http://0.0.0.0:8080/v1")
 
     state.runner = AgentRunner(
         event_queue=state.event_queue,
         tools=tools,
+        model=model,
+        base_url=base_url,
     )
 
 

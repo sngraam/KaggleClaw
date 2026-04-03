@@ -9,7 +9,6 @@ from openai_harmony import (
     TextContent,
 )
 
-
 def _maybe_update_inplace_and_validate_channel(
     *, input_message: Message, tool_message: Message
 ) -> None:
@@ -26,13 +25,6 @@ def _maybe_update_inplace_and_validate_channel(
 
 
 class Tool(ABC):
-    """
-    Something the model can call.
-
-    Tools expose APIs that are shown to the model in a syntax that the model
-    understands and knows how to call (from training data). Tools allow the
-    model to do things like run code, browse the web, etc.
-    """
 
     @property
     @abstractmethod

@@ -16,6 +16,12 @@
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 
+  <!-- KaTeX for LaTeX math rendering -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+    onload="renderMathInAllElements()"></script>
+
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -41,6 +47,7 @@
     </div>
 
     <div class="header-right">
+      <button id="btn-debug" class="btn btn-ghost" onclick="toggleDebug()" title="Toggle debug panel">🐛 Debug</button>
       <button id="btn-host-model" class="btn btn-ghost host-model-btn" onclick="triggerHostModel()">Host Model</button>
       <button id="btn-stop-hosting" class="btn btn-ghost host-model-btn hidden" onclick="triggerStopHosting()" style="color: var(--red); border-color: rgba(248,113,113,0.35);">Stop Hosting</button>
       <a id="url-pill" class="url-pill hidden" href="#" target="_blank">
@@ -135,6 +142,18 @@
       </div>
     </aside>
 
+  </div>
+
+  <!-- Debug Panel (hidden by default) -->
+  <div id="debug-panel" style="display:none; position:fixed; bottom:0; left:0; right:0; height:220px;
+       background:var(--bg-2,#1a1a2e); border-top:1px solid var(--border,#2d2d4e); z-index:200;
+       display:none; flex-direction:column;">
+    <div style="display:flex; align-items:center; padding:6px 12px; border-bottom:1px solid var(--border,#2d2d4e);">
+      <span style="font-size:12px; font-weight:600; color:var(--text-muted,#888); flex:1;">🐛 Event Log</span>
+      <button onclick="clearDebug()" style="font-size:11px; background:none; border:none; color:var(--text-muted,#888); cursor:pointer;">Clear</button>
+    </div>
+    <div id="debug-log" style="flex:1; overflow-y:auto; font-family:'JetBrains Mono',monospace;
+         font-size:11px; padding:6px 12px; color:#a0a0c0;"></div>
   </div>
 
   <script src="/static/app.js"></script>

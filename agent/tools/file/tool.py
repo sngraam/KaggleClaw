@@ -36,18 +36,6 @@ def _resolve_and_check(path: str, allowed_roots: list[str]) -> Path:
 
 
 class FileTool(Tool):
-    """
-    File system operations for the Kaggle working directory.
-
-    Commands (sent as plain text to the tool):
-        read <path>
-        write <path>\n<content>
-        list [path]
-        delete <path>
-        mkdir <path>
-        exists <path>
-        move <src> <dst>
-    """
 
     @property
     def name(self) -> str:

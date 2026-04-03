@@ -9,6 +9,10 @@ Source: https://cookbook.openai.com/examples/gpt4-1_prompting_guide
 
 from __future__ import annotations
 
+import os
+from typing import AsyncIterator
+from uuid import uuid4
+
 import pathlib
 from dataclasses import dataclass, field
 from enum import Enum
@@ -527,3 +531,108 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ── KaggleClaw Tool wrapper ────────────────────────────────────────────────────
+
+try:
+    from openai_harmony import Author, Message, Role, TextContent
+    from ..tool import Tool as _BaseTool
+
+    # Sandboxed root for apply_patch writes
+    _PATCH_ROOT = "/kaggle/working" if os.path.exists("/kaggle") else "."
+
+    def _sandboxed_open(path: str) -> str:
+        """Read a file — no restriction on reads."""
+        return open_file(path)
+
+    def _sandboxed_write(path: str, content: str) -> None:
+        """Write only inside the allowed root."""
+        import pathlib
+        target = pathlib.Path(path).resolve()
+        root   = pathlib.Path(_PATCH_ROOT).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise PermissionError(
+                f"apply_patch: write outside allowed root '{_PATCH_ROOT}': {path}"
+            )
+        write_file(path, content)
+
+    def _sandboxed_remove(path: str) -> None:
+        """Delete only inside the allowed root."""
+        import pathlib
+        target = pathlib.Path(path).resolve()
+        root   = pathlib.Path(_PATCH_ROOT).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise PermissionError(
+                f"apply_patch: delete outside allowed root '{_PATCH_ROOT}': {path}"
+            )
+        remove_file(path)
+
+    class ApplyPatchTool(_BaseTool):
+        """Apply a pseudo-diff patch to files in /kaggle/working/."""
+
+        @property
+        def name(self) -> str:
+            return "apply_patch"
+
+        def instruction(self) -> str:
+            return """Apply a pseudo-diff patch to one or more files in the working directory.
+
+Patch format (must start with *** Begin Patch and end with *** End Patch):
+
+*** Begin Patch
+*** Update File: path/to/file.py
+@@ context line above change @@
+-old line to remove
++new line to add
+ context line below
+*** End Patch
+
+Supported actions: Update File, Add File, Delete File, Move to.
+Use this for surgical edits — it's faster than rewriting whole files.
+"""
+
+        def _make_response(self, text: str, channel: str | None = None) -> Message:
+            return Message(
+                id=uuid4(),
+                author=Author(role=Role.TOOL, name=self.name),
+                content=[TextContent(text=text)],
+                channel=channel,
+            ).with_recipient("assistant")
+
+        async def _process(self, message: Message) -> AsyncIterator[Message]:
+            raw = ""
+            if message.content:
+                c = message.content
+                if isinstance(c, list):
+                    raw = c[0].text.strip() if hasattr(c[0], "text") else str(c[0])
+                elif hasattr(c, "text"):
+                    raw = c.text.strip()
+                else:
+                    raw = str(c).strip()
+
+            try:
+                result = apply_patch(
+                    raw,
+                    open_fn=_sandboxed_open,
+                    write_fn=_sandboxed_write,
+                    remove_fn=_sandboxed_remove,
+                )
+            except DiffError as exc:
+                result = f"[PATCH ERROR] {exc}"
+            except PermissionError as exc:
+                result = f"[PERMISSION ERROR] {exc}"
+            except Exception as exc:
+                result = f"[ERROR] {type(exc).__name__}: {exc}"
+
+            yield self._make_response(result, channel=message.channel)
+
+except ImportError:
+    # openai_harmony not installed — define a stub so imports don't break
+    class ApplyPatchTool:  # type: ignore[no-redef]
+        name = "apply_patch"
+        def instruction(self): return ""

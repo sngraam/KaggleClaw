@@ -1,42 +1,87 @@
 /**
- * KaggleClaw — Frontend chat consumer (v3)
- * Flat ChatGPT-style interface. No overflow containers causing scroll issues.
- * Each message is a flex row: avatar + content bubble.
+ * KaggleClaw — Frontend (v4)
+ * Features:
+ *   • Harmony special token decoder (200002–200012)
+ *   • Throttled streaming render via requestAnimationFrame
+ *   • KaTeX LaTeX rendering ($...$ and $$...$$) after markdown
+ *   • Collapsible debug event log panel
+ *   • Detailed error display with stack traces
  */
 
-// ── State ────────────────────────────────────────────────────────
-let eventSource = null;
-let stats = { turns: 0, tools: 0, events: 0 };
-let isAgentRunning = false;
+// ── Harmony Special Tokens ───────────────────────────────────────────────────
+const HARMONY_TOKENS = {
+  200002: { label: '<|return|>',    color: '#f87171' },
+  200003: { label: '<|constrain|>', color: '#a78bfa' },
+  200005: { label: '<|channel|>',   color: '#60a5fa' },
+  200006: { label: '<|start|>',     color: '#34d399' },
+  200007: { label: '<|end|>',       color: '#fb923c' },
+  200008: { label: '<|message|>',   color: '#facc15' },
+  200012: { label: '<|call|>',      color: '#f472b6' },
+};
 
-// Active streaming text node for the current assistant turn
-let activeAssistantMsg = null; // DOM element for the current streaming message
-let activeThinkBlock = null;   // DOM element for the current thinking block
+// ── State ─────────────────────────────────────────────────────────────────────
+let eventSource      = null;
+let stats            = { turns: 0, tools: 0, events: 0 };
+let isAgentRunning   = false;
+let debugVisible     = false;
 
-// ── Init ─────────────────────────────────────────────────────────
+// Active streaming elements
+let activeAssistantMsg = null;
+let activeThinkBlock   = null;
+
+// Throttled render queue
+let _renderQueue    = [];   // [{el, rawText}]
+let _rafScheduled   = false;
+let _debugLogEl     = null;
+
+// ── Init ──────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   marked.setOptions({ breaks: true, gfm: true });
+  _debugLogEl = document.getElementById('debug-log');
   loadCompetitionInfo();
   loadHealth();
   connectSSE();
   loadFileTree();
 });
 
-// ── SSE ──────────────────────────────────────────────────────────
+// ── KaTeX helper ──────────────────────────────────────────────────────────────
+function renderMathInAllElements() { /* called by KaTeX auto-render onload */ }
+
+function renderMathIn(el) {
+  if (window.renderMathInElement) {
+    try {
+      renderMathInElement(el, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '$',  right: '$',  display: false },
+          { left: '\\(', right: '\\)', display: false },
+          { left: '\\[', right: '\\]', display: true },
+        ],
+        throwOnError: false,
+      });
+    } catch (_) {}
+  }
+}
+
+// ── SSE Connection ────────────────────────────────────────────────────────────
 function connectSSE() {
   if (eventSource) eventSource.close();
   eventSource = new EventSource('/stream');
   eventSource.onmessage = (e) => {
-    try { handleEvent(JSON.parse(e.data)); } catch {}
+    try { handleEvent(JSON.parse(e.data)); } catch(err) { logDebug('parse_error', err.message, '#f87171'); }
   };
   eventSource.onerror = () => setTimeout(connectSSE, 3000);
 }
 
-// ── Event Router ─────────────────────────────────────────────────
+// ── Event Router ──────────────────────────────────────────────────────────────
 function handleEvent(data) {
   if (data.type === 'ping') return;
   stats.events++;
   updateStats();
+
+  // Debug log every event
+  const tokenLabel = data.metadata?.token || '';
+  logDebug(data.type, (data.content || '').slice(0, 120) + (data.tool_name ? ` [${data.tool_name}]` : '') + (tokenLabel ? ` ${tokenLabel}` : ''));
 
   switch (data.type) {
     case 'thinking':
@@ -76,9 +121,319 @@ function handleEvent(data) {
   }
 }
 
-// ── Chat Message Builders ────────────────────────────────────────
+// ── Thinking block (collapsible, streaming) ───────────────────────────────────
+function appendThinking(text) {
+  if (!activeThinkBlock) {
+    const row    = document.createElement('div');
+    row.className = 'msg-row msg-think';
 
-/** Create a message row. Returns the content element. */
+    const avatar = document.createElement('div');
+    avatar.className = 'msg-avatar';
+    avatar.textContent = '🧠';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    const toggle = document.createElement('div');
+    toggle.className = 'think-toggle';
+    toggle.innerHTML = '<span class="think-label">Reasoning <span class="think-arrow">▾</span></span>';
+
+    const body = document.createElement('div');
+    body.className = 'think-body open';
+    body.style.whiteSpace = 'pre-wrap';
+
+    toggle.addEventListener('click', () => {
+      body.classList.toggle('open');
+      toggle.querySelector('.think-arrow').textContent = body.classList.contains('open') ? '▾' : '▸';
+    });
+
+    bubble.appendChild(toggle);
+    bubble.appendChild(body);
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    document.getElementById('feed').appendChild(row);
+    activeThinkBlock = body;
+    hideFeedEmpty();
+  }
+  // Throttled append to thinking block
+  _enqueueRender(activeThinkBlock, text, 'think');
+}
+
+function finalizeThinking() {
+  if (activeThinkBlock) {
+    _flushRender(activeThinkBlock);
+  }
+  activeThinkBlock = null;
+}
+
+// ── Assistant text (streaming markdown + KaTeX) ───────────────────────────────
+function appendAssistantText(text) {
+  if (!activeAssistantMsg) {
+    const row = document.createElement('div');
+    row.className = 'msg-row msg-assistant';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'msg-avatar';
+    avatar.textContent = '⚡';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    const body = document.createElement('div');
+    body.className = 'msg-body md-content streaming-cursor';
+    body._raw = '';
+    bubble.appendChild(body);
+
+    row.appendChild(avatar);
+    row.appendChild(bubble);
+    document.getElementById('feed').appendChild(row);
+    activeAssistantMsg = body;
+    hideFeedEmpty();
+  }
+  _enqueueRender(activeAssistantMsg, text, 'markdown');
+}
+
+function finalizeAssistant() {
+  if (activeAssistantMsg) {
+    _flushRender(activeAssistantMsg);
+    activeAssistantMsg.classList.remove('streaming-cursor');
+    _applyMarkdown(activeAssistantMsg);
+    activeAssistantMsg = null;
+  }
+}
+
+// ── Throttled render system ───────────────────────────────────────────────────
+
+/**
+ * Queue a text chunk for a given element.
+ * mode: 'think' (plain pre-wrap) | 'markdown' (markdown+katex)
+ */
+function _enqueueRender(el, text, mode) {
+  // Find existing entry for this element
+  const existing = _renderQueue.find(q => q.el === el);
+  if (existing) {
+    existing.text += text;
+  } else {
+    _renderQueue.push({ el, text, mode });
+  }
+  if (!_rafScheduled) {
+    _rafScheduled = true;
+    requestAnimationFrame(_processRenderQueue);
+  }
+}
+
+function _processRenderQueue() {
+  _rafScheduled = false;
+  const queue = _renderQueue.splice(0);
+  for (const { el, text, mode } of queue) {
+    if (mode === 'think') {
+      el.textContent += text;
+    } else {
+      el._raw = (el._raw || '') + text;
+      // Only do a quick innerHTML update while streaming; full render on finalize
+      el.innerHTML = marked.parse(el._raw);
+      el.querySelectorAll('pre code:not([data-hl])').forEach(block => {
+        hljs.highlightElement(block);
+        block.dataset.hl = '1';
+      });
+    }
+  }
+  autoScroll();
+  // If still streaming, reschedule
+  if (_renderQueue.length > 0 && !_rafScheduled) {
+    _rafScheduled = true;
+    requestAnimationFrame(_processRenderQueue);
+  }
+}
+
+function _flushRender(el) {
+  const idx = _renderQueue.findIndex(q => q.el === el);
+  if (idx >= 0) {
+    const { text, mode } = _renderQueue.splice(idx, 1)[0];
+    if (mode === 'think') {
+      el.textContent += text;
+    } else {
+      el._raw = (el._raw || '') + text;
+    }
+  }
+}
+
+function _applyMarkdown(el) {
+  if (!el._raw) return;
+  el.innerHTML = marked.parse(el._raw);
+  el.querySelectorAll('pre code:not([data-hl])').forEach(block => {
+    hljs.highlightElement(block);
+    block.dataset.hl = '1';
+  });
+  renderMathIn(el);
+}
+
+// ── User message ──────────────────────────────────────────────────────────────
+function appendUserMsg(text) {
+  finalizeAssistant();
+  finalizeThinking();
+  const body = createMsgRow('user', '🙋', null);
+  body.textContent = text;
+}
+
+// ── Tool Call ─────────────────────────────────────────────────────────────────
+function appendToolCall(toolName, args) {
+  stats.turns++;
+  updateStats();
+
+  const row = document.createElement('div');
+  row.className = 'msg-row msg-tool';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.textContent = _toolIcon(toolName);
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble tool-bubble';
+
+  const hdr = document.createElement('div');
+  hdr.className = 'msg-header tool-header';
+  hdr.innerHTML = `Tool Call <span class="tool-name">${toolName}</span>`;
+
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.classList.add('language-json');
+  try { code.textContent = JSON.stringify(JSON.parse(args), null, 2); }
+  catch { code.textContent = args || '{}'; }
+  pre.appendChild(code);
+  hljs.highlightElement(code);
+
+  bubble.appendChild(hdr);
+  bubble.appendChild(pre);
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  document.getElementById('feed').appendChild(row);
+  hideFeedEmpty();
+  autoScroll();
+}
+
+// ── Tool Result ───────────────────────────────────────────────────────────────
+function appendToolResult(toolName, output) {
+  const row = document.createElement('div');
+  row.className = 'msg-row msg-tool-result';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.textContent = '📤';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+
+  const toggle = document.createElement('div');
+  toggle.className = 'think-toggle';
+  toggle.innerHTML = `<span class="think-label">Output <span class="tool-name">${toolName}</span> <span class="think-arrow">▸</span></span>`;
+
+  const body = document.createElement('pre');
+  body.className = 'tool-output';
+  body.style.display = 'none';
+  body.textContent = output || '(empty)';
+
+  toggle.addEventListener('click', () => {
+    const open = body.style.display === 'none';
+    body.style.display = open ? '' : 'none';
+    toggle.querySelector('.think-arrow').textContent = open ? '▾' : '▸';
+  });
+
+  bubble.appendChild(toggle);
+  bubble.appendChild(body);
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  document.getElementById('feed').appendChild(row);
+  autoScroll();
+}
+
+// ── Error message ─────────────────────────────────────────────────────────────
+function appendError(msg) {
+  const row = document.createElement('div');
+  row.className = 'msg-row msg-error';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.textContent = '⚠️';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+  bubble.style.background = 'rgba(248,113,113,0.08)';
+  bubble.style.border = '1px solid rgba(248,113,113,0.3)';
+
+  const hdr = document.createElement('div');
+  hdr.className = 'msg-header';
+  hdr.style.color = '#f87171';
+  hdr.textContent = '⚠️ Error';
+
+  // Split into short message and optional stack trace
+  const lines = (msg || '').split('\n');
+  const shortMsg = lines[0] || 'Unknown error';
+  const hasTrace = lines.length > 2;
+
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+  body.style.color = '#fca5a5';
+  body.textContent = shortMsg;
+
+  bubble.appendChild(hdr);
+  bubble.appendChild(body);
+
+  if (hasTrace) {
+    const details = document.createElement('details');
+    details.style.marginTop = '8px';
+    const summary = document.createElement('summary');
+    summary.style.cssText = 'cursor:pointer; font-size:11px; color:#888; list-style:none;';
+    summary.textContent = 'Show stack trace ▸';
+    const trace = document.createElement('pre');
+    trace.style.cssText = 'font-size:11px; color:#aaa; white-space:pre-wrap; margin-top:6px; padding:8px; background:rgba(0,0,0,0.3); border-radius:4px;';
+    trace.textContent = lines.slice(1).join('\n');
+    details.appendChild(summary);
+    details.appendChild(trace);
+    bubble.appendChild(details);
+  }
+
+  row.appendChild(avatar);
+  row.appendChild(bubble);
+  document.getElementById('feed').appendChild(row);
+  hideFeedEmpty();
+  autoScroll();
+}
+
+// ── Status Event ──────────────────────────────────────────────────────────────
+function handleStatusEvent(content, metadata) {
+  if (!content || content === 'Calling model...') return;
+
+  if (content.includes('Starting agent') || content.includes('Turn ')) {
+    setStatus('running', 'Running');
+    isAgentRunning = true;
+    setTypingVisible(true);
+    setStopGenVisible(true);
+  } else if (content.includes('cancelled')) {
+    setStatus('idle', 'Idle');
+    isAgentRunning = false;
+    setTypingVisible(false);
+    setStopGenVisible(false);
+    setBtnLoading(false);
+  }
+
+  if (metadata?.done) {
+    setStatus('done', '✅ Done');
+    isAgentRunning = false;
+    setTypingVisible(false);
+    setStopGenVisible(false);
+    setBtnLoading(false);
+  }
+
+  const feed = document.getElementById('feed');
+  const el = document.createElement('div');
+  el.className = 'status-chip';
+  el.textContent = content;
+  feed.appendChild(el);
+  autoScroll();
+}
+
+// ── Generic row builder ───────────────────────────────────────────────────────
 function createMsgRow(type, icon, headerLabel) {
   const row = document.createElement('div');
   row.className = `msg-row msg-${type}`;
@@ -115,219 +470,66 @@ function createMsgRow(type, icon, headerLabel) {
   return body;
 }
 
-// ── Thinking block (collapsible) ─────────────────────────────────
-function appendThinking(text) {
-  if (!activeThinkBlock) {
-    // Create the thinking collapsible row
-    const row = document.createElement('div');
-    row.className = 'msg-row msg-think';
+// ── Debug Panel ───────────────────────────────────────────────────────────────
+function toggleDebug() {
+  debugVisible = !debugVisible;
+  const panel = document.getElementById('debug-panel');
+  panel.style.display = debugVisible ? 'flex' : 'none';
+  document.getElementById('btn-debug').textContent = debugVisible ? '🐛 Hide Debug' : '🐛 Debug';
+}
 
-    const avatar = document.createElement('div');
-    avatar.className = 'msg-avatar';
-    avatar.textContent = '🧠';
+function clearDebug() {
+  if (_debugLogEl) _debugLogEl.innerHTML = '';
+}
 
-    const bubble = document.createElement('div');
-    bubble.className = 'msg-bubble';
-
-    const toggle = document.createElement('div');
-    toggle.className = 'think-toggle';
-    toggle.innerHTML = '<span class="think-label">Reasoning <span class="think-arrow">▾</span></span>';
-    const body = document.createElement('div');
-    body.className = 'think-body open';
-    body.style.whiteSpace = 'pre-wrap';
-
-    toggle.addEventListener('click', () => {
-      body.classList.toggle('open');
-      toggle.querySelector('.think-arrow').textContent = body.classList.contains('open') ? '▾' : '▸';
-    });
-
-    bubble.appendChild(toggle);
-    bubble.appendChild(body);
-    row.appendChild(avatar);
-    row.appendChild(bubble);
-    document.getElementById('feed').appendChild(row);
-    activeThinkBlock = body;
-    hideFeedEmpty();
+function logDebug(type, content, color) {
+  if (!_debugLogEl) return;
+  const ts = new Date().toISOString().slice(11, 23);
+  const typeColors = {
+    thinking:    '#a78bfa',
+    text:        '#34d399',
+    tool_call:   '#f472b6',
+    tool_result: '#60a5fa',
+    error:       '#f87171',
+    status:      '#facc15',
+    done:        '#34d399',
+    parse_error: '#f87171',
+  };
+  const c = color || typeColors[type] || '#a0a0c0';
+  const line = document.createElement('div');
+  line.style.borderBottom = '1px solid rgba(255,255,255,0.04)';
+  line.style.padding = '2px 0';
+  line.innerHTML =
+    `<span style="color:#555">${ts}</span> ` +
+    `<span style="color:${c};font-weight:600">[${type}]</span> ` +
+    `<span style="color:#c0c0d0">${_escapeHtml(content)}</span>`;
+  _debugLogEl.appendChild(line);
+  // Keep max 500 lines
+  while (_debugLogEl.children.length > 500) {
+    _debugLogEl.removeChild(_debugLogEl.firstChild);
   }
-  activeThinkBlock.textContent += text;
-  autoScroll();
+  _debugLogEl.scrollTop = _debugLogEl.scrollHeight;
 }
 
-function finalizeThinking() {
-  activeThinkBlock = null;
+function _escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
-// ── Assistant text (streaming markdown) ──────────────────────────
-function appendAssistantText(text) {
-  if (!activeAssistantMsg) {
-    const row = document.createElement('div');
-    row.className = 'msg-row msg-assistant';
-
-    const avatar = document.createElement('div');
-    avatar.className = 'msg-avatar';
-    avatar.textContent = '⚡';
-
-    const bubble = document.createElement('div');
-    bubble.className = 'msg-bubble';
-
-    const body = document.createElement('div');
-    body.className = 'msg-body md-content streaming-cursor';
-    body._raw = '';
-    bubble.appendChild(body);
-
-    row.appendChild(avatar);
-    row.appendChild(bubble);
-    document.getElementById('feed').appendChild(row);
-    activeAssistantMsg = body;
-    hideFeedEmpty();
-  }
-
-  activeAssistantMsg._raw = (activeAssistantMsg._raw || '') + text;
-  activeAssistantMsg.innerHTML = marked.parse(activeAssistantMsg._raw);
-  activeAssistantMsg.classList.add('streaming-cursor');
-
-  // Re-highlight code blocks without duplicating
-  activeAssistantMsg.querySelectorAll('pre code:not([data-hl])').forEach(block => {
-    hljs.highlightElement(block);
-    block.dataset.hl = '1';
-  });
-  autoScroll();
+function _toolIcon(name) {
+  const icons = {
+    python:      '🐍',
+    file:        '📁',
+    apply_patch: '🩹',
+    web_search:  '🔍',
+    plan_follow: '📋',
+  };
+  return icons[name] || '🔧';
 }
 
-function finalizeAssistant() {
-  if (activeAssistantMsg) {
-    activeAssistantMsg.classList.remove('streaming-cursor');
-    activeAssistantMsg.querySelectorAll('pre code:not([data-hl])').forEach(block => {
-      hljs.highlightElement(block);
-      block.dataset.hl = '1';
-    });
-    activeAssistantMsg = null;
-  }
-}
-
-// ── User message ──────────────────────────────────────────────────
-function appendUserMsg(text) {
-  finalizeAssistant();
-  finalizeThinking();
-  const body = createMsgRow('user', '🙋', null);
-  body.textContent = text;
-}
-
-// ── Tool Call ─────────────────────────────────────────────────────
-function appendToolCall(toolName, args) {
-  stats.turns++;
-  updateStats();
-
-  const row = document.createElement('div');
-  row.className = 'msg-row msg-tool';
-
-  const avatar = document.createElement('div');
-  avatar.className = 'msg-avatar';
-  avatar.textContent = '🔧';
-
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble tool-bubble';
-
-  const hdr = document.createElement('div');
-  hdr.className = 'msg-header tool-header';
-  hdr.innerHTML = `Tool Call <span class="tool-name">${toolName}</span>`;
-
-  const pre = document.createElement('pre');
-  const code = document.createElement('code');
-  code.classList.add('language-json');
-  try {
-    code.textContent = JSON.stringify(JSON.parse(args), null, 2);
-  } catch { 
-    code.textContent = args || '{}'; 
-  }
-  pre.appendChild(code);
-  hljs.highlightElement(code);
-
-  bubble.appendChild(hdr);
-  bubble.appendChild(pre);
-  row.appendChild(avatar);
-  row.appendChild(bubble);
-  document.getElementById('feed').appendChild(row);
-  hideFeedEmpty();
-  autoScroll();
-}
-
-// ── Tool Result ───────────────────────────────────────────────────
-function appendToolResult(toolName, output) {
-  const row = document.createElement('div');
-  row.className = 'msg-row msg-tool-result';
-
-  const avatar = document.createElement('div');
-  avatar.className = 'msg-avatar';
-  avatar.textContent = '📤';
-
-  const bubble = document.createElement('div');
-  bubble.className = 'msg-bubble';
-
-  const toggle = document.createElement('div');
-  toggle.className = 'think-toggle';
-  toggle.innerHTML = `<span class="think-label">Output <span class="tool-name">${toolName}</span> <span class="think-arrow">▸</span></span>`;
-
-  const body = document.createElement('pre');
-  body.className = 'tool-output';
-  body.style.display = 'none';
-  body.textContent = output || '(empty)';
-
-  toggle.addEventListener('click', () => {
-    const open = body.style.display === 'none';
-    body.style.display = open ? '' : 'none';
-    toggle.querySelector('.think-arrow').textContent = open ? '▾' : '▸';
-  });
-
-  bubble.appendChild(toggle);
-  bubble.appendChild(body);
-  row.appendChild(avatar);
-  row.appendChild(bubble);
-  document.getElementById('feed').appendChild(row);
-  autoScroll();
-}
-
-// ── Error ─────────────────────────────────────────────────────────
-function appendError(msg) {
-  const body = createMsgRow('error', '⚠️', 'Error');
-  body.textContent = msg;
-}
-
-// ── Status Event ──────────────────────────────────────────────────
-function handleStatusEvent(content, metadata) {
-  if (!content || content === 'Calling model...') return;
-
-  if (content.includes('Starting agent') || content.includes('Turn ')) {
-    setStatus('running', 'Running');
-    isAgentRunning = true;
-    setTypingVisible(true);
-    setStopGenVisible(true);
-  } else if (content.includes('cancelled')) {
-    setStatus('idle', 'Idle');
-    isAgentRunning = false;
-    setTypingVisible(false);
-    setStopGenVisible(false);
-    setBtnLoading(false);
-  }
-
-  if (metadata?.done) {
-    setStatus('done', '✅ Done');
-    isAgentRunning = false;
-    setTypingVisible(false);
-    setStopGenVisible(false);
-    setBtnLoading(false);
-  }
-
-  // Small inline status message
-  const feed = document.getElementById('feed');
-  const el = document.createElement('div');
-  el.className = 'status-chip';
-  el.textContent = content;
-  feed.appendChild(el);
-  autoScroll();
-}
-
-// ── API Calls ─────────────────────────────────────────────────────
+// ── API Calls ─────────────────────────────────────────────────────────────────
 async function startAgent() {
   if (isAgentRunning) return;
   isAgentRunning = true;
@@ -409,23 +611,26 @@ async function resetAgent() {
     </div>
   `;
 
+  _renderQueue.length = 0;
+  _rafScheduled = false;
   stats = { turns: 0, tools: 0, events: 0 };
   updateStats();
-  isAgentRunning = false;
+  isAgentRunning   = false;
   activeAssistantMsg = null;
-  activeThinkBlock = null;
+  activeThinkBlock  = null;
   setStatus('idle', 'Idle');
   setTypingVisible(false);
   setStopGenVisible(false);
   setBtnLoading(false);
+  clearDebug();
 
   try { await fetch('/reset', { method: 'POST' }); } catch {}
   connectSSE();
 }
 
-// ── File Tree ─────────────────────────────────────────────────────
+// ── File Tree ─────────────────────────────────────────────────────────────────
 async function loadFileTree() {
-  const treeEl = document.getElementById('file-tree');
+  const treeEl    = document.getElementById('file-tree');
   const loadingEl = document.getElementById('file-tree-loading');
   try {
     const res = await fetch('/files');
@@ -439,7 +644,7 @@ async function loadFileTree() {
 }
 
 function refreshFileTree() {
-  const treeEl = document.getElementById('file-tree');
+  const treeEl    = document.getElementById('file-tree');
   const loadingEl = document.getElementById('file-tree-loading');
   treeEl.innerHTML = '';
   if (loadingEl) { loadingEl.style.display = ''; loadingEl.textContent = 'Loading...'; }
@@ -449,8 +654,8 @@ function refreshFileTree() {
 function renderFileTree(container, nodes) {
   for (const node of nodes) {
     if (node.type === 'dir') {
-      const wrap = document.createElement('div');
-      const dirEl = document.createElement('div');
+      const wrap   = document.createElement('div');
+      const dirEl  = document.createElement('div');
       dirEl.className = 'ft-dir';
       dirEl.innerHTML = `<span class="ft-arrow">▸</span>📁 ${node.name}`;
 
@@ -476,17 +681,17 @@ function renderFileTree(container, nodes) {
   }
 }
 
-// ── Sidebar Data ──────────────────────────────────────────────────
+// ── Sidebar Data ──────────────────────────────────────────────────────────────
 async function loadCompetitionInfo() {
   try {
-    const res = await fetch('/competition');
+    const res  = await fetch('/competition');
     const data = await res.json();
-    setText('s-name', data.name || '—');
-    setText('s-task', data.task || '—');
-    setText('s-metric', data.metric || '—');
-    setText('s-target', data.target || '—');
-    setText('s-deadline', data.deadline || '—');
-    setText('comp-task', data.task || '—');
+    setText('s-name',    data.name     || '—');
+    setText('s-task',    data.task     || '—');
+    setText('s-metric',  data.metric   || '—');
+    setText('s-target',  data.target   || '—');
+    setText('s-deadline',data.deadline || '—');
+    setText('comp-task',   data.task   || '—');
     setText('comp-metric', data.metric || '—');
     if (data.url && data.url !== '—') document.getElementById('s-url').href = data.url;
     if (data.task !== '—' || data.metric !== '—') document.getElementById('comp-badge').classList.remove('hidden');
@@ -495,7 +700,7 @@ async function loadCompetitionInfo() {
 
 async function loadHealth() {
   try {
-    const res = await fetch('/health');
+    const res  = await fetch('/health');
     const data = await res.json();
     if (data.public_url) {
       const pill = document.getElementById('url-pill');
@@ -506,7 +711,7 @@ async function loadHealth() {
   } catch {}
 }
 
-// ── UI Helpers ────────────────────────────────────────────────────
+// ── UI Helpers ────────────────────────────────────────────────────────────────
 function hideFeedEmpty() {
   const el = document.getElementById('feed-empty');
   if (el) el.style.display = 'none';
@@ -528,7 +733,7 @@ function setStopGenVisible(v) {
 
 function setBtnLoading(loading) {
   const btn = document.getElementById('btn-start');
-  btn.disabled = loading;
+  btn.disabled    = loading;
   btn.textContent = loading ? '⏳ Running...' : '▶ Start Agent';
 }
 
@@ -538,8 +743,8 @@ function setText(id, val) {
 }
 
 function updateStats() {
-  setText('stat-turns', stats.turns);
-  setText('stat-tools', stats.tools);
+  setText('stat-turns',  stats.turns);
+  setText('stat-tools',  stats.tools);
   setText('stat-events', stats.events);
 }
 
@@ -549,14 +754,14 @@ function autoScroll() {
   if (nearBottom) feed.scrollTop = feed.scrollHeight;
 }
 
-// ── Model Hosting ─────────────────────────────────────────────────
+// ── Model Hosting ─────────────────────────────────────────────────────────────
 async function triggerHostModel() {
-  const btn = document.getElementById('btn-host-model');
+  const btn     = document.getElementById('btn-host-model');
   const btnStop = document.getElementById('btn-stop-hosting');
-  btn.disabled = true;
+  btn.disabled    = true;
   btn.textContent = '⏳ Hosting...';
   try {
-    const res = await fetch('/host_model', { method: 'POST' });
+    const res  = await fetch('/host_model', { method: 'POST' });
     const data = await res.json();
     if (data.status === 'hosting_started' || data.status === 'already_hosting') {
       btn.classList.add('hidden');
@@ -569,13 +774,13 @@ async function triggerHostModel() {
 
 async function triggerStopHosting() {
   const btnStart = document.getElementById('btn-host-model');
-  const btnStop = document.getElementById('btn-stop-hosting');
-  btnStop.disabled = true;
+  const btnStop  = document.getElementById('btn-stop-hosting');
+  btnStop.disabled    = true;
   btnStop.textContent = '⏳ Stopping...';
   try {
     await fetch('/stop_hosting', { method: 'POST' });
     btnStop.classList.add('hidden');
-    btnStop.disabled = false;
+    btnStop.disabled    = false;
     btnStop.textContent = 'Stop Hosting';
     if (btnStart) { btnStart.classList.remove('hidden'); btnStart.disabled = false; btnStart.textContent = 'Host Model'; }
   } catch { btnStop.textContent = '❌ Failed'; btnStop.disabled = false; }
