@@ -12,7 +12,7 @@ def get_all_tools(sandbox=None):
     python_tool = PythonTool(
         local_jupyter_timeout=120.0,
         tool_prompt=None,
-        sandbox=sandbox or Sandbox(timeout=120.0),
+        sandbox=sandbox,
     )
     return [
         python_tool,
