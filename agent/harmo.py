@@ -75,11 +75,9 @@ class HarmoTemplate:
 from datetime import date
 from pathlib import Path
 
-from config.settings import settings
-
-WORKING_DIR = settings.PROJECT_DIR
-RUN_DIR     = settings.RUN_DIR
-INPUT_DIR   = settings.INPUT_DIR
+WORKING_DIR = "/kaggle/working/KaggleClaw"
+RUN_DIR     = "/kaggle/working/KaggleClaw/run"
+INPUT_DIR   = "/kaggle/input/notebooks/sangrampatil5150/notebook38b92fed30/"
 
 
 def _read_safe(path: str) -> str:
@@ -94,8 +92,8 @@ def _load_competition_context() -> str:
         content = _read_safe(p)
         if content != "[file not found]":
             # Prevent context length overflows if user pastes massive text
-            if len(content) > 30000:
-                return content[:30000] + "\n\n... [TRUNCATED] ... \nWARNING: competition.md was too long. Consider using file or web tools to read specifics."
+            if len(content) > 5000:
+                return content[:5000] + "\n\n... [TRUNCATED] ... \nWARNING: competition.md was too long. Consider using file or web tools to read specifics."
             return content
     return "[competition.md not found — please create it]"
 

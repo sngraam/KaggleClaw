@@ -1,5 +1,5 @@
 """
-api/tunnel.py — ngrok tunnel manager.
+server/tunnel.py — ngrok tunnel manager.
 """
 
 import os

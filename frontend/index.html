@@ -121,7 +121,7 @@
       </div>
     </main>
 
-    <!-- Right Sidebar: File Tree -->
+    <!-- Right Sidebar: File Tree + Terminal Logger -->
     <aside id="file-sidebar">
       <div class="sidebar-section">
         <div class="sidebar-title-row">
@@ -139,6 +139,18 @@
           <div class="dir-row"><span class="dir-icon">🧪</span><span class="dir-path">/kaggle/working/run/</span></div>
           <div class="dir-row"><span class="dir-icon">📊</span><span class="dir-path">/kaggle/input/</span></div>
         </div>
+      </div>
+
+      <!-- Terminal Logger -->
+      <div class="sidebar-section terminal-section">
+        <div class="sidebar-title-row">
+          <span class="sidebar-title">⬛ Terminal Log</span>
+          <div style="display:flex;gap:4px;">
+            <button class="icon-btn" onclick="clearTerminalLog()" title="Clear log">🗑</button>
+            <button id="btn-copy-log" class="icon-btn" onclick="copyTerminalLog()" title="Copy all log lines">📋 Copy</button>
+          </div>
+        </div>
+        <div id="terminal-log" class="terminal-log"></div>
       </div>
     </aside>
 

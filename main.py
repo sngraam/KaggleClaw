@@ -19,12 +19,11 @@ PORT = int(os.environ.get("PORT", 8000))
 
 # ── Start ngrok tunnel ─────────────────────────────────────────
 print("🔌 Starting ngrok tunnel...")
-from api.tunnel import start_tunnel
-from api.state import state
-from config.settings import settings
+from server.tunnel import start_tunnel
+from server.state import state
 
 try:
-    public_url = start_tunnel(port=settings.PORT, auth_token=os.environ.get("NGROK_AUTH_TOKEN"))
+    public_url = start_tunnel(port=PORT, auth_token=locals().get("CONF_TOKEN") or os.environ.get("NGROK_AUTH_TOKEN"))
     state.public_url = public_url
     print(f"\n{'='*55}")
     print(f"  ⚡ KaggleClaw is LIVE")
@@ -38,13 +37,13 @@ except Exception as e:
 
 # ── Start FastAPI ──────────────────────────────────────────────
 import uvicorn
-from api.app import app
+from server.app import app
 
 if __name__ == "__main__":
     uvicorn.run(
         app,
-        host=settings.HOST,
-        port=settings.PORT,
+        host="0.0.0.0",
+        port=PORT,
         log_level="warning",   # keep output clean
         access_log=False,
     )

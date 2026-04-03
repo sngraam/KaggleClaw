@@ -43,6 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadHealth();
   connectSSE();
   loadFileTree();
+  loadServerLogs();  // populate terminal logger from server ring-buffer on load
 });
 
 // ── KaTeX helper ──────────────────────────────────────────────────────────────
@@ -76,13 +77,24 @@ function connectSSE() {
 
 // ── Event Router ──────────────────────────────────────────────────────────────
 function handleEvent(data) {
-  if (data.type === 'ping') return;
+  if (data.type === 'ping') return;   // SSE keep-alive — ignore silently
   stats.events++;
   updateStats();
 
   // Debug log every event
   const tokenLabel = data.metadata?.token || '';
   logDebug(data.type, (data.content || '').slice(0, 120) + (data.tool_name ? ` [${data.tool_name}]` : '') + (tokenLabel ? ` ${tokenLabel}` : ''));
+
+  // Terminal logger — pipe key events
+  switch (data.type) {
+    case 'status':     appendTerminalLog('status',  data.content); break;
+    case 'error':      appendTerminalLog('error',   data.content); break;
+    case 'tool_call':  appendTerminalLog('tool',    `▶ ${data.tool_name}: ${(data.content||'').slice(0,120)}`); break;
+    case 'tool_result':appendTerminalLog('result',  `◀ ${data.tool_name}: ${(data.content||'').slice(0,120)}`); break;
+    case 'done':       appendTerminalLog('done',    data.content || '✅ Agent done'); break;
+    case 'thinking':   appendTerminalLog('think',   `🧠 ${(data.content||'').slice(0,80)}`); break;
+    default: break;
+  }
 
   switch (data.type) {
     case 'thinking':
@@ -526,6 +538,81 @@ function logDebug(type, content, color) {
     _debugLogEl.removeChild(_debugLogEl.firstChild);
   }
   _debugLogEl.scrollTop = _debugLogEl.scrollHeight;
+}
+
+// ── Terminal Logger ───────────────────────────────────────────────────────────
+
+const TERM_COLORS = {
+  status:  '#60a5fa',  // blue
+  error:   '#f87171',  // red
+  tool:    '#f472b6',  // pink
+  result:  '#34d399',  // green
+  done:    '#a78bfa',  // purple
+  think:   '#94a3b8',  // slate
+  server:  '#facc15',  // yellow (for server-side logs)
+  default: '#c0c0d0',
+};
+
+function appendTerminalLog(type, message, isServer = false) {
+  const el = document.getElementById('terminal-log');
+  if (!el) return;
+
+  const ts  = new Date().toISOString().slice(11, 23);
+  const col = TERM_COLORS[type] || TERM_COLORS.default;
+
+  const line = document.createElement('div');
+  line.className = 'term-line';
+  const prefix = isServer ? '[server] ' : '';
+  line.innerHTML =
+    `<span class="term-ts">${ts}</span>` +
+    `<span class="term-badge" style="color:${col}">[${type}]</span>` +
+    `<span class="term-msg">${_escapeHtml(prefix + (message || ''))}</span>`;
+
+  el.appendChild(line);
+
+  // Cap at 800 lines
+  while (el.children.length > 800) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearTerminalLog() {
+  const el = document.getElementById('terminal-log');
+  if (el) el.innerHTML = '';
+}
+
+async function copyTerminalLog() {
+  const el = document.getElementById('terminal-log');
+  if (!el) return;
+  const text = Array.from(el.querySelectorAll('.term-line'))
+    .map(l => l.textContent)
+    .join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    const btn = document.getElementById('btn-copy-log');
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = '✅ Copied!';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    }
+  } catch (e) {
+    // Fallback: open in new window so user can copy manually
+    const w = window.open('', '_blank');
+    if (w) {
+      w.document.write('<pre>' + _escapeHtml(text) + '</pre>');
+      w.document.close();
+    }
+  }
+}
+
+async function loadServerLogs() {
+  try {
+    const res = await fetch('/logs?n=100');
+    if (!res.ok) return;
+    const data = await res.json();
+    for (const line of (data.lines || [])) {
+      appendTerminalLog('server', line, true);
+    }
+  } catch { /* server may not have logs yet */ }
 }
 
 function _escapeHtml(str) {

@@ -277,18 +277,10 @@ IMPORTANT: Your python environment is not shared between calls. You will have to
 
     async def process(self, message: Message):
         import asyncio
-        # Run the synchronous Jupyter execution in a separate thread so we don't block the FastAPI event loop
-        # and to avoid triggering nest_asyncio to try and patch uvloop directly in the main thread.
-        def _run_with_loop():
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            return self.process_sync_plus(message)
-
+        # Run synchronous Jupyter execution in a thread pool to avoid blocking the FastAPI event loop.
+        # We do NOT call get_event_loop() inside the thread — process_sync_plus is purely synchronous.
         try:
-            responses = await asyncio.to_thread(_run_with_loop)
+            responses = await asyncio.to_thread(self.process_sync_plus, message)
             for resp in responses:
                 yield resp
         except Exception as e:
