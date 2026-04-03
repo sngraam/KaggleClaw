@@ -152,12 +152,13 @@ async def stream(request: Request):
                 }
                 # Persist to conversation history
                 state.conversation.append(payload)
-                yield {"data": json.dumps(payload)}
+                yield f"data: {json.dumps(payload)}\n\n"
             except asyncio.TimeoutError:
                 # keepalive ping
-                yield {"data": json.dumps({"type": "ping"})}
+                yield f"data: {json.dumps({'type': 'ping'})}\n\n"
 
-    return EventSourceResponse(generator())
+    from fastapi.responses import StreamingResponse
+    return StreamingResponse(generator(), media_type="text/event-stream")
 
 
 @app.post("/start")

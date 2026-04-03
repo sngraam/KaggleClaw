@@ -300,6 +300,7 @@ class AgentRunner:
         tool_message: Message | None = None
         current_channel = None
         emitted_len = 0
+        new_messages = []
 
         try:
             async for chunk in stream:
@@ -333,8 +334,6 @@ class AgentRunner:
 
                 if not new_messages:
                     continue
-
-                self.messages.extend([m for m in new_messages if m not in self.messages])
 
                 msg = new_messages[-1]
                 channel   = getattr(msg, "channel", None)
@@ -404,6 +403,9 @@ class AgentRunner:
         except Exception as exc:
             await self._emit_error("Error during token streaming", exc)
             return None
+
+        if new_messages:
+            self.messages.extend(new_messages)
 
         # If no tool was requested, this was a final answer
         if tool_message is None:
