@@ -127,6 +127,7 @@ async def list_files():
 
     return {"base": str(working_dir), "tree": _build_tree(working_dir)}
 
+from fastapi.responses import StreamingResponse
 
 import json
 
@@ -158,7 +159,6 @@ async def stream_agent():
             yield f"data: {json.dumps(error_payload)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
-
 
 @app.post("/start")
 async def start_agent(request: Request):
