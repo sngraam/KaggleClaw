@@ -279,11 +279,12 @@ class AgentRunner:
                 max_tokens=max_tokens,
                 temperature=self.temperature,
                 stream=True,
+                logprobs=5,
                 stop=None,
                 extra_body={
                     "stop_token_ids": self.stop_token_ids,
                     "return_token_ids": True,
-                    "min_p": 0.0,
+                    "min_p": 0.02,
                 },
             )
         except Exception as exc:
